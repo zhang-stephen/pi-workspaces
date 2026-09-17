@@ -1,0 +1,13 @@
+# nodejs
+node_modules/
+dist/
+*.log
+
+# OS-related
+.DS_Store
+
+# editor/agent
+.pi/
+.agent/
+.claude/
+.vscode/
