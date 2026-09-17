@@ -1,12 +1,15 @@
 // Unit tests for src/tools.ts: the read/write/edit and grep/find/ls
-// overrides. The overrides are registered into a mockPi and driven headlessly
-// against temp-dir fixtures via mockCtx; no pi runtime and no LLM involved.
+// overrides plus the bash override with its added cwd parameter. The
+// overrides are registered into a mockPi and driven headlessly against
+// temp-dir fixtures via mockCtx; no pi runtime and no LLM involved.
 // grep/find go through the real ripgrep/fd binaries resolved from the pi
-// tools directory (~/.pi/agent/bin), same as the built-ins do.
+// tools directory (~/.pi/agent/bin), same as the built-ins do; bash goes
+// through the real bundled shell.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { createBashToolDefinition } from "@earendil-works/pi-coding-agent";
 import { makeTempDir, mockCtx, mockPi, writeFile } from "./helpers.ts";
 import type { RootInfo, WorkspaceInfo } from "../src/path-resolver.ts";
 import { registerToolOverrides, type ToolDeps } from "../src/tools.ts";
@@ -76,7 +79,7 @@ function registeredTools(ws: WorkspaceInfo | null, sessionDir: string, note?: st
 test("registers exactly read/write/edit/grep/find/ls, mirroring built-in schemas and docs", () => {
   const { sessionDir, ws } = makeFixture();
   const { pi } = registeredTools(ws, sessionDir);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["edit", "find", "grep", "ls", "read", "write"]);
+  assert.deepEqual([...pi.tools.keys()].sort(), ["bash", "edit", "find", "grep", "ls", "read", "write"]);
   for (const name of ["read", "write", "edit", "grep", "find", "ls"]) {
     const tool: any = pi.tools.get(name);
     assert.equal(tool.name, name);
@@ -106,6 +109,18 @@ test("registers exactly read/write/edit/grep/find/ls, mirroring built-in schemas
   assert.deepEqual(Object.keys(find.parameters.properties), ["pattern", "path", "limit"]);
   const ls: any = pi.tools.get("ls");
   assert.deepEqual(Object.keys(ls.parameters.properties), ["path", "limit"]);
+  // bash mirrors the built-in schema exactly, plus the added optional cwd
+  // whose description documents the '@root-name/sub/dir' syntax.
+  const bash: any = pi.tools.get("bash");
+  assert.equal(bash.label, "bash");
+  assert.ok(Array.isArray(bash.promptGuidelines) && bash.promptGuidelines.length > 0);
+  assert.equal(bash.renderCall, undefined);
+  assert.equal(bash.renderResult, undefined);
+  assert.deepEqual(Object.keys(bash.parameters.properties), ["command", "timeout", "cwd"]);
+  assert.match(bash.parameters.properties.cwd.description, /@root-name\/sub\/dir/);
+  const builtinBash: any = createBashToolDefinition(sessionDir);
+  assert.deepEqual(bash.parameters.properties.command, builtinBash.parameters.properties.command);
+  assert.deepEqual(bash.parameters.properties.timeout, builtinBash.parameters.properties.timeout);
 });
 
 test("read: bare relative resolves against session cwd, @b/... against root b", async () => {
@@ -255,4 +270,42 @@ test("no active workspace: bare relative works unchanged, @root errors", async (
   );
   // Sanity: the fixture workspace really was inactive here.
   assert.equal(ws.name, "demo");
+});
+
+test("bash: pwd with cwd @b runs inside root b (basename, shell-format agnostic)", { timeout: 15000 }, async () => {
+  const { sessionDir, ws } = makeFixture();
+  // Default note: the routed cwd touches root b, so the first-touch note
+  // precedes the command output (asserted here as part of the same call).
+  const { pi } = registeredTools(ws, sessionDir);
+  const bash: any = pi.tools.get("bash");
+  const result = await bash.execute("c1", { command: "pwd", cwd: "@b" }, undefined, undefined, mockCtx(sessionDir));
+  assert.ok(!result.isError);
+  assert.equal(result.content[0].text, "first touch: root 'b'");
+  // pi's bundled shell may print Windows paths as '/c/...' or 'C:/...':
+  // assert the directory basename, never the drive-letter format.
+  const out = result.content[result.content.length - 1].text;
+  assert.ok(out.includes("root-b"), `expected root b's dir in pwd output, got: ${out}`);
+  assert.ok(!out.includes("root-a"), `root a must not appear in pwd output, got: ${out}`);
+  assert.ok(!out.includes("session"), `session dir must not appear in pwd output, got: ${out}`);
+});
+
+test("bash: omitted cwd runs in the session cwd", { timeout: 15000 }, async () => {
+  const { sessionDir, ws } = makeFixture();
+  // null note: assert raw command output, not first-touch behavior.
+  const { pi } = registeredTools(ws, sessionDir, null);
+  const bash: any = pi.tools.get("bash");
+  const result = await bash.execute("c1", { command: "pwd" }, undefined, undefined, mockCtx(sessionDir));
+  assert.ok(!result.isError);
+  const out = result.content[result.content.length - 1].text;
+  assert.ok(out.includes("session"), `expected session dir in pwd output, got: ${out}`);
+});
+
+test("bash: unknown root in cwd throws naming the root", { timeout: 15000 }, async () => {
+  const { sessionDir, ws } = makeFixture();
+  const { pi } = registeredTools(ws, sessionDir);
+  const bash: any = pi.tools.get("bash");
+  await assert.rejects(
+    bash.execute("c1", { command: "pwd", cwd: "@zzz" }, undefined, undefined, mockCtx(sessionDir)),
+    /Unknown root 'zzz'/,
+  );
 });

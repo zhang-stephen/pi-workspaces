@@ -1,6 +1,8 @@
 // Tool overrides for the file tools read/write/edit and the search tools
-// grep/find/ls (bash follows in a later task; FILE_TOOL_SPECS is the single
-// extension point).
+// grep/find/ls, plus the bash tool with an added cwd parameter
+// (FILE_TOOL_SPECS covers the six file tools; bash is registered separately
+// because its schema has no path parameter to resolve - it grows an
+// optional cwd instead).
 // Each override is a thin wrapper around the built-in definition produced by
 // pi's createXxxToolDefinition factory: the '@root-name/...' prefix in
 // params.path is resolved to an absolute path via the pure resolver, then a
@@ -13,6 +15,8 @@
 // search/list scope, defaulting to the bound cwd), so an absent path skips
 // resolution entirely and delegates verbatim - the built-in default.
 import {
+  createBashTool,
+  createBashToolDefinition,
   createEditToolDefinition,
   createFindToolDefinition,
   createGrepToolDefinition,
@@ -20,6 +24,7 @@ import {
   createReadToolDefinition,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { resolveWorkspacePath, type RootInfo, type WorkspaceInfo } from "./path-resolver.ts";
 
 export interface ToolDeps {
@@ -86,6 +91,7 @@ export function registerToolOverrides(pi: any, deps: ToolDeps): void {
       execute: makeWorkspaceExecute(spec, deps),
     });
   }
+  registerBashOverride(pi, deps);
 }
 
 function makeWorkspaceExecute(spec: FileToolSpec, deps: ToolDeps) {
@@ -135,6 +141,78 @@ function makeWorkspaceExecute(spec: FileToolSpec, deps: ToolDeps) {
     );
     if (resolved.root) {
       const note = deps.onFirstTouch(resolved.root);
+      if (note !== null) {
+        return { ...result, content: [{ type: "text", text: note }, ...result.content] };
+      }
+    }
+    return result;
+  };
+}
+
+// Description of the added cwd parameter; carries the workspace syntax so
+// the model learns it from the tool schema itself (the bash override keeps
+// the base tool description unchanged - the syntax note above talks about
+// tool paths, which bash has none of).
+const BASH_CWD_DESCRIPTION =
+  "Working directory to run the command in (optional, defaults to the session start directory): " +
+  "an absolute path, or '@root-name/sub/dir' to run inside a workspace root. " +
+  "Unknown root names and '..' escapes are reported as errors.";
+
+function registerBashOverride(pi: any, deps: ToolDeps): void {
+  const base = createBashToolDefinition(deps.sessionCwd());
+  const { execute: _baseExecute, renderCall: _omitRenderCall, renderResult: _omitRenderResult, ...rest } = base;
+  // Superset of the built-in schema: same command/timeout property objects,
+  // plus the optional cwd (order: built-ins first, cwd last).
+  const parameters = Type.Object({
+    ...(base.parameters as any).properties,
+    cwd: Type.Optional(Type.String({ description: BASH_CWD_DESCRIPTION })),
+  });
+  pi.registerTool({
+    ...rest,
+    parameters,
+    execute: makeBashExecute(deps),
+  });
+}
+
+function makeBashExecute(deps: ToolDeps) {
+  return async (
+    toolCallId: string,
+    params: { command: string; timeout?: number; cwd?: string } & Record<string, any>,
+    signal: AbortSignal | undefined,
+    onUpdate: any,
+    _ctx: any,
+  ): Promise<any> => {
+    const { cwd, ...bashParams } = params;
+    let target: string;
+    let root: RootInfo | null = null;
+    if (cwd === undefined) {
+      // No cwd: run in the session start directory, exactly like the built-in.
+      target = deps.sessionCwd();
+    } else {
+      if (typeof cwd !== "string") {
+        throw new Error("params.cwd must be a string");
+      }
+      const resolved = resolveWorkspacePath(cwd, deps.getActive(), deps.sessionCwd());
+      if (!resolved.ok) {
+        // Throw, not an isError return: executeToolCall converts throws into
+        // isError:true results (same contract as the file-tool overrides).
+        throw new Error(resolved.error);
+      }
+      target = resolved.absolutePath;
+      root = resolved.root;
+    }
+    // Delegate to the AgentTool factory, NOT the ToolDefinition: the
+    // definition's execute prefers ctx.cwd over the factory-bound cwd
+    // (verified against dist: resolveSpawnContext(resolvedCommand,
+    // ctx?.cwd || cwd, ...)), so passing the runtime ctx through would
+    // silently discard the resolved target. The AgentTool signature carries
+    // no ctx, so the built-in falls back to exactly the cwd bound here.
+    // bash is stateless (a fresh process per call), so a per-call factory
+    // instance bound at the target directory is cheap and safe.
+    const tool = createBashTool(target);
+    const result = await tool.execute(toolCallId, bashParams, signal, onUpdate);
+    if (root) {
+      const note = deps.onFirstTouch(root);
       if (note !== null) {
         return { ...result, content: [{ type: "text", text: note }, ...result.content] };
       }
