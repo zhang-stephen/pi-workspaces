@@ -27,7 +27,7 @@ export const BUILTIN_DEFAULTS: WorkspaceOptions = {
   promptInOtherDirs: true,
 };
 
-const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
+export const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const KNOWN_OPTIONS = ["autoLoadInPrimary", "promptInOtherDirs"] as const;
 
 type ValidationResult =

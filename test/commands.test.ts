@@ -120,7 +120,7 @@ test("formatList shows every workspace with origin, primary and MISSING roots", 
   }
 });
 
-test("unload clears the active workspace and appends a session entry", async () => {
+test("unload clears the active workspace via setActive(null, ctx)", async () => {
   const agentDir = makeTempDir("pi-workspaces-agent-");
   const cwd = makeTempDir("pi-workspaces-cwd-");
   const prev = process.env.PI_CODING_AGENT_DIR;
@@ -132,11 +132,13 @@ test("unload clears the active workspace and appends a session entry", async () 
     );
     let setCalls = 0;
     let clearedWith: WorkspaceInfo | null | undefined;
+    let clearedWithCtx: unknown;
     const deps: CommandDeps = {
       getActive: () => activeNow,
-      setActive: (ws) => {
+      setActive: (ws, ctxArg) => {
         setCalls++;
         clearedWith = ws;
+        clearedWithCtx = ctxArg;
       },
     };
     const pi = mockPi();
@@ -148,8 +150,9 @@ test("unload clears the active workspace and appends a session entry", async () 
 
     assert.equal(setCalls, 1);
     assert.equal(clearedWith, null);
-    // The unload is journaled so a later session can see it happened.
-    assert.deepEqual(pi.entries.get("pi-workspaces:unload"), [{ name: "demo" }]);
+    // Journaling is setActive's concern (pi-workspaces:active entries);
+    // the command itself just delegates with the session ctx.
+    assert.equal(clearedWithCtx, ctx);
     assert.ok(notes.some(([msg, level]) => /unloaded/i.test(msg) && level === "info"));
 
     // A second unload with nothing active errors instead of clearing again.

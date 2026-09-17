@@ -7,8 +7,7 @@
 // Every mutation follows the same durable flow: reload the definition from
 // disk via loadAll, mutate the pure way, saveDefinition back to its origin
 // directory (atomic tmp+rename), then setActive(toWorkspaceInfo(...)) so
-// the runtime shape is rebuilt from what was actually persisted. unload
-// additionally journals a "pi-workspaces:unload" session entry.
+// the runtime shape is rebuilt from what was actually persisted.
 // ASCII only - no emoji or symbols.
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -18,6 +17,7 @@ import {
   addRoot,
   globalWorkspacesDir,
   loadAll,
+  NAME_PATTERN,
   projectWorkspacesDir,
   removeRoot,
   saveDefinition,
@@ -33,9 +33,6 @@ export interface CommandDeps {
   setActive(ws: WorkspaceInfo | null, ctx?: any): void;
 }
 
-/** Session-entry type journaled when the active workspace is unloaded. */
-const UNLOAD_ENTRY_TYPE = "pi-workspaces:unload";
-
 const USAGE = `Usage: /workspace [subcommand]
   (none)                  show active workspace status
   list                    list workspaces from global and project sources
@@ -45,10 +42,6 @@ const USAGE = `Usage: /workspace [subcommand]
                           sole primary root (saved to the global source)
   add-root [name] <path>  add a root to the active workspace
   remove-root <name>      remove a root from the active workspace`;
-
-// Mirror of the store's NAME_PATTERN (not exported there): definition and
-// root names share one alphabet.
-const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 
 /**
  * One root line shared by the format helpers: two-space indented
@@ -112,7 +105,7 @@ function errorMessage(err: unknown): string {
 /**
  * Register the single /workspace command on the extension API. `pi` is
  * typed loosely (mirrors the other register* modules) so tests can pass a
- * capturing stub; only registerCommand and appendEntry are used.
+ * capturing stub; only registerCommand is used.
  */
 export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
   pi.registerCommand("workspace", {
@@ -135,7 +128,7 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
           case "load":
             return await loadWorkspace(ctx, deps, rest[0]);
           case "unload":
-            return unloadWorkspace(pi, ctx, deps);
+            return unloadWorkspace(ctx, deps);
           case "create":
             return await createWorkspace(ctx, deps, rest[0]);
           case "add-root":
@@ -183,16 +176,15 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
   notify(ctx, formatStatus(ws));
 }
 
-function unloadWorkspace(pi: any, ctx: ExtensionCommandContext, deps: CommandDeps): void {
+function unloadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps): void {
   const active = deps.getActive();
   if (!active) {
     notify(ctx, "No workspace is active.", "error");
     return;
   }
+  // Session journaling is setActive's concern (pi-workspaces:active
+  // entries, landed in index.ts); the command only deactivates.
   deps.setActive(null, ctx);
-  // Journal the unload (distinct from the "pi-workspaces:active" entries
-  // that setActive appends) so session history records the deactivation.
-  pi.appendEntry(UNLOAD_ENTRY_TYPE, { name: active.name });
   notify(ctx, `Workspace '${active.name}' unloaded.`);
 }
 
