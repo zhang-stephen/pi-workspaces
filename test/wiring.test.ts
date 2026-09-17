@@ -190,3 +190,101 @@ test("before_agent_start appends the workspace section only when a workspace is 
     fx.restore();
   }
 });
+
+test("session_start select offers only the containing workspace when the cwd is inside a non-primary root", async () => {
+  const fx = isolatedFixture();
+  const primaryDir = makeTempDir("pi-workspaces-primary-");
+  const libDir = makeTempDir("pi-workspaces-lib-");
+  const otherDir = makeTempDir("pi-workspaces-other-");
+  try {
+    // "holder" declares "lib" as a non-primary root; the session cwd sits
+    // inside it. "other" contains nothing near the cwd.
+    const holderDef = {
+      name: "holder",
+      version: 1,
+      roots: [
+        { name: "app", path: primaryDir },
+        { name: "lib", path: libDir },
+      ],
+      primary: "app",
+    };
+    const otherDef = {
+      name: "other",
+      version: 1,
+      roots: [{ name: "o", path: otherDir }],
+      primary: "o",
+    };
+    writeFile(fx.agentDir, path.join("workspaces", "holder.json"), JSON.stringify(holderDef));
+    writeFile(fx.agentDir, path.join("workspaces", "other.json"), JSON.stringify(otherDef));
+
+    // The cwd is no workspace's primary root, so no auto-load pre-empts the
+    // prompt; it sits beneath "holder"'s non-primary "lib" root.
+    const cwd = path.join(libDir, "deep");
+    fs.mkdirSync(cwd);
+
+    const pi = mockPi();
+    factory(pi);
+    const selects: Array<{ message: string; items: string[] }> = [];
+    const ctx = mockCtx(cwd, { hasUI: true });
+    ctx.ui.select = async (message: string, items: string[]) => {
+      selects.push({ message, items });
+      return undefined;
+    };
+
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    // Two-layer semantics: only the containing workspace is offered, with
+    // the escape hatch appended.
+    assert.deepEqual(selects, [
+      { message: "Load a workspace for this session?", items: ["holder", "Don't load"] },
+    ]);
+    // Declining the prompt activates nothing.
+    assert.equal(pi.entries.get("pi-workspaces:active"), undefined);
+  } finally {
+    cleanup(primaryDir, libDir, otherDir);
+    fx.restore();
+  }
+});
+
+test("session_start select offers every promptable workspace when the cwd is outside all roots", async () => {
+  const fx = isolatedFixture();
+  const alphaDir = makeTempDir("pi-workspaces-alpha-");
+  const betaDir = makeTempDir("pi-workspaces-beta-");
+  try {
+    const alphaDef = {
+      name: "alpha",
+      version: 1,
+      roots: [{ name: "a", path: alphaDir }],
+      primary: "a",
+    };
+    const betaDef = {
+      name: "beta",
+      version: 1,
+      roots: [{ name: "b", path: betaDir }],
+      primary: "b",
+    };
+    writeFile(fx.agentDir, path.join("workspaces", "alpha.json"), JSON.stringify(alphaDef));
+    writeFile(fx.agentDir, path.join("workspaces", "beta.json"), JSON.stringify(betaDef));
+
+    const pi = mockPi();
+    factory(pi);
+    const selects: Array<{ message: string; items: string[] }> = [];
+    const ctx = mockCtx(fx.cwd, { hasUI: true });
+    ctx.ui.select = async (message: string, items: string[]) => {
+      selects.push({ message, items });
+      return undefined;
+    };
+
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    // No workspace contains the cwd, so the prompt falls back to every
+    // promptable workspace (sorted source order) plus the escape hatch.
+    assert.deepEqual(selects, [
+      { message: "Load a workspace for this session?", items: ["alpha", "beta", "Don't load"] },
+    ]);
+    assert.equal(pi.entries.get("pi-workspaces:active"), undefined);
+  } finally {
+    cleanup(alphaDir, betaDir);
+    fx.restore();
+  }
+});

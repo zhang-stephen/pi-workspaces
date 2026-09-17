@@ -6,14 +6,15 @@
 //   session_start -> loadAll -> notify warnings/collisions -> auto-load
 //   when the session cwd equals a workspace's primary root and
 //   autoLoadInPrimary resolves true -> journal restore (session resume)
-//   -> select prompt when promptInOtherDirs resolves true and ctx.hasUI.
+//   -> select prompt when ctx.hasUI: the containing workspaces only when
+//   the cwd sits in a non-primary root, otherwise every promptable one.
 // setActive is the single activation point: it owns the first-touch
 // tracker reset, the statusline refresh and the pi-workspaces:active
 // journal entry - nothing else writes the journal.
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAutocompleteProvider } from "./src/autocomplete.ts";
 import { registerWorkspaceCommands } from "./src/commands.ts";
-import type { WorkspaceInfo } from "./src/path-resolver.ts";
+import { isInside, type WorkspaceInfo } from "./src/path-resolver.ts";
 import { buildWorkspacePromptSection, FirstTouchTracker, makeConstraintReader } from "./src/prompt-inject.ts";
 import { refreshStatus } from "./src/statusline.ts";
 import { registerToolOverrides } from "./src/tools.ts";
@@ -44,15 +45,15 @@ function samePath(a: string, b: string): boolean {
  * Scan the current session's entries for the last pi-workspaces:active
  * journal entry and return its recorded workspace name. The session is
  * append-only, so the last matching entry is the most recent activation
- * state. Returns undefined when the session manager exposes no entry list
- * (or the session has no journal) so callers can tell "no journal" apart
- * from a journaled unload (null), which restores nothing.
+ * state. Returns undefined when the ctx has no session manager so callers
+ * can tell "no journal" apart from a journaled unload (null), which
+ * restores nothing.
  */
 function journaledActiveName(ctx: {
-  sessionManager?: { getEntries?: () => unknown[] };
+  sessionManager?: { getEntries: () => unknown[] };
 }): string | null | undefined {
   const getEntries = ctx.sessionManager?.getEntries;
-  if (typeof getEntries !== "function") return undefined;
+  if (!getEntries) return undefined;
   let name: string | null | undefined;
   for (const raw of getEntries()) {
     const entry = raw as { type?: string; customType?: string; data?: unknown } | null | undefined;
@@ -148,9 +149,15 @@ export default function piWorkspaces(pi: ExtensionAPI): void {
       }
     }
 
-    // 3. Ask: offer every workspace whose promptInOtherDirs resolves true,
-    //    always with a "Don't load" escape hatch.
-    const candidates = merged.filter(({ def }) => resolveOptions(def, globalDefaults).promptInOtherDirs);
+    // 3. Ask: two layers. When the cwd sits inside some workspace's
+    //    non-primary root, offer only those containing workspaces;
+    //    otherwise offer every workspace whose promptInOtherDirs resolves
+    //    true. Always with a "Don't load" escape hatch.
+    const containing = merged.filter(({ def }) =>
+      def.roots.some((r) => r.name !== def.primary && isInside(r.path, ctx.cwd)),
+    );
+    const pool = containing.length > 0 ? containing : merged;
+    const candidates = pool.filter(({ def }) => resolveOptions(def, globalDefaults).promptInOtherDirs);
     if (candidates.length > 0 && ctx.hasUI) {
       const names = candidates.map((c) => c.def.name);
       const choice = await ctx.ui.select("Load a workspace for this session?", [...names, "Don't load"]);
