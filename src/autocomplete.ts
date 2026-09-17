@@ -116,7 +116,10 @@ export function createAutocompleteProvider(getActive: () => WorkspaceInfo | null
     async getSuggestions(lines, cursorLine, cursorCol, options) {
       const before = (lines[cursorLine] ?? "").slice(0, cursorCol);
       const parsed = parseAtToken(before);
-      const ws = parsed ? getActive() : null;
+      // Quoted @-mentions ("@\"doc") are file attachments owned by the
+      // built-in provider, not @root syntax; the rootPart regex would
+      // swallow the quote, so hand the token back untouched.
+      const ws = parsed && !parsed.rootPart.startsWith('"') ? getActive() : null;
       if (!parsed || !ws) {
         return current.getSuggestions(lines, cursorLine, cursorCol, options);
       }

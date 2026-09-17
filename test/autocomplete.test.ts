@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseAtToken, completeRootNames, completeInRoot } from "../src/autocomplete.ts";
+import { parseAtToken, completeRootNames, completeInRoot, createAutocompleteProvider } from "../src/autocomplete.ts";
 import type { RootInfo, WorkspaceInfo } from "../src/path-resolver.ts";
 
 test("parseAtToken extracts @tokens only at line start or after whitespace", () => {
@@ -69,6 +69,67 @@ test("completeInRoot lists entries, skips node_modules/.git, caps at 50", () => 
     fs.rmSync(root.path, { recursive: true, force: true });
   }
 });
+
+test("createAutocompleteProvider delegates quoted @-mentions to the built-in provider", async () => {
+  // '@"doc' is a quoted file attachment, not @root syntax: the built-in
+  // provider's fuzzy file matching must see it untouched.
+  const marker = { items: [{ value: "doc.pdf", label: "doc.pdf" }], prefix: "@\"doc" };
+  const current = makeStubCurrent(marker);
+  const provider = createAutocompleteProvider(() => makeWorkspace())(current as never);
+  const result = await provider.getSuggestions(["@\"doc"], 0, 5, { signal: new AbortController().signal });
+  assert.equal(result, marker);
+  assert.equal(current.calls, 1);
+});
+
+test("createAutocompleteProvider delegates when no workspace is active", async () => {
+  const marker = { items: [{ value: "@anything", label: "@anything" }], prefix: "@a" };
+  const current = makeStubCurrent(marker);
+  const provider = createAutocompleteProvider(() => null)(current as never);
+  const result = await provider.getSuggestions(["@a"], 0, 2, { signal: new AbortController().signal });
+  assert.equal(result, marker);
+  assert.equal(current.calls, 1);
+});
+
+test("createAutocompleteProvider returns empty items for unknown roots in stage 2", async () => {
+  const marker = { items: [{ value: "stub", label: "stub" }], prefix: "stub" };
+  const current = makeStubCurrent(marker);
+  const provider = createAutocompleteProvider(() => makeWorkspace())(current as never);
+  const result = await provider.getSuggestions(["@zzz/x"], 0, 6, { signal: new AbortController().signal });
+  // Empty items (no fuzzy fallthrough to the built-in layer), and no delegation.
+  assert.deepEqual(result, { items: [], prefix: "@zzz/x" });
+  assert.equal(current.calls, 0);
+});
+
+/** Minimal AutocompleteProviderOut stub: getSuggestions returns `marker`. */
+function makeStubCurrent(marker: unknown): {
+  getSuggestions: () => Promise<unknown>;
+  applyCompletion: () => never;
+  shouldTriggerFileCompletion: () => boolean;
+  calls: number;
+} {
+  const stub = {
+    calls: 0,
+    getSuggestions: () => {
+      stub.calls += 1;
+      return Promise.resolve(marker);
+    },
+    applyCompletion: (): never => {
+      throw new Error("applyCompletion should not be called in these tests");
+    },
+    shouldTriggerFileCompletion: () => true,
+  };
+  return stub;
+}
+
+/** Workspace fixture with one root for provider-level tests. */
+function makeWorkspace(): WorkspaceInfo {
+  return {
+    name: "demo",
+    origin: "project",
+    primary: "alpha",
+    roots: [{ name: "alpha", path: "/ws/alpha", exists: true }],
+  };
+}
 
 /** Build a RootInfo over a fresh temp directory with known contents. */
 function makeFixtureRoot(): RootInfo {
