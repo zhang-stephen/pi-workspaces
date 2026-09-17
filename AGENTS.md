@@ -24,7 +24,7 @@ All designs live in [docs/](./docs) - **read them before implementing anything**
 pi -e /path/to/pi-workspaces/index.ts
 
 # Run tests
-node --test test/
+node --test "test/**/*.ts"
 ```
 
 ## Directory Layout
@@ -63,4 +63,4 @@ docs/                    # Design specs and docs (kept out of git for now)
 
 - Conventional Commits with a scope naming the touched component: `feat(src):`, `fix(src):`, `test(test):`, `docs:`, English descriptions
 - The `docs/` directory stays uncommitted for now (working tree only)
-- Run `node --test test/` before every commit
+- Run `node --test "test/**/*.ts"` before every commit
