@@ -1,5 +1,6 @@
-// Tool overrides for the file tools read/write/edit (grep/find/ls and bash
-// follow in later tasks; FILE_TOOL_SPECS is the single extension point).
+// Tool overrides for the file tools read/write/edit and the search tools
+// grep/find/ls (bash follows in a later task; FILE_TOOL_SPECS is the single
+// extension point).
 // Each override is a thin wrapper around the built-in definition produced by
 // pi's createXxxToolDefinition factory: the '@root-name/...' prefix in
 // params.path is resolved to an absolute path via the pure resolver, then a
@@ -8,8 +9,14 @@
 // renderShell, prepareArguments) is spread from the base definition;
 // renderCall/renderResult stay omitted so the built-in renderers are
 // inherited automatically by tool name.
+// Difference vs read/write/edit: grep/find/ls declare path as OPTIONAL (the
+// search/list scope, defaulting to the bound cwd), so an absent path skips
+// resolution entirely and delegates verbatim - the built-in default.
 import {
   createEditToolDefinition,
+  createFindToolDefinition,
+  createGrepToolDefinition,
+  createLsToolDefinition,
   createReadToolDefinition,
   createWriteToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -53,12 +60,19 @@ interface FileToolDefinition {
 interface FileToolSpec {
   name: string;
   factory(cwd: string): FileToolDefinition;
+  // grep/find/ls: path is optional in the built-in schema and selects the
+  // search/list scope; when omitted there is nothing to resolve and the
+  // built-in default (the bound cwd) applies unchanged.
+  pathOptional?: boolean;
 }
 
 const FILE_TOOL_SPECS: FileToolSpec[] = [
   { name: "read", factory: createReadToolDefinition },
   { name: "write", factory: createWriteToolDefinition },
   { name: "edit", factory: createEditToolDefinition },
+  { name: "grep", factory: createGrepToolDefinition, pathOptional: true },
+  { name: "find", factory: createFindToolDefinition, pathOptional: true },
+  { name: "ls", factory: createLsToolDefinition, pathOptional: true },
 ];
 
 export function registerToolOverrides(pi: any, deps: ToolDeps): void {
@@ -82,7 +96,16 @@ function makeWorkspaceExecute(spec: FileToolSpec, deps: ToolDeps) {
     onUpdate: any,
     ctx: any,
   ): Promise<any> => {
-    if (typeof params.path !== "string") throw new Error("params.path must be a string");
+    if (typeof params.path !== "string") {
+      // Optional-path tools (grep/find/ls) pass an ABSENT path straight
+      // through: no '@root' to resolve, built-in default cwd applies. A
+      // present-but-non-string path is a malformed call either way.
+      if (params.path === undefined && spec.pathOptional) {
+        const instance = spec.factory(deps.sessionCwd());
+        return instance.execute(toolCallId, params, signal, onUpdate, ctx);
+      }
+      throw new Error("params.path must be a string");
+    }
     const resolved = resolveWorkspacePath(params.path, deps.getActive(), deps.sessionCwd());
     if (!resolved.ok) {
       // Throw, not an isError return: executeToolCall marks normal returns

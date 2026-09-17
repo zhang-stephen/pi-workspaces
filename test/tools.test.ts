@@ -1,6 +1,8 @@
-// Unit tests for src/tools.ts: the read/write/edit overrides. The overrides
-// are registered into a mockPi and driven headlessly against temp-dir
-// fixtures via mockCtx; no pi runtime and no LLM involved.
+// Unit tests for src/tools.ts: the read/write/edit and grep/find/ls
+// overrides. The overrides are registered into a mockPi and driven headlessly
+// against temp-dir fixtures via mockCtx; no pi runtime and no LLM involved.
+// grep/find go through the real ripgrep/fd binaries resolved from the pi
+// tools directory (~/.pi/agent/bin), same as the built-ins do.
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -71,11 +73,11 @@ function registeredTools(ws: WorkspaceInfo | null, sessionDir: string, note?: st
   return { pi, deps, touched };
 }
 
-test("registers exactly read/write/edit, mirroring built-in schemas and docs", () => {
+test("registers exactly read/write/edit/grep/find/ls, mirroring built-in schemas and docs", () => {
   const { sessionDir, ws } = makeFixture();
   const { pi } = registeredTools(ws, sessionDir);
-  assert.deepEqual([...pi.tools.keys()].sort(), ["edit", "read", "write"]);
-  for (const name of ["read", "write", "edit"]) {
+  assert.deepEqual([...pi.tools.keys()].sort(), ["edit", "find", "grep", "ls", "read", "write"]);
+  for (const name of ["read", "write", "edit", "grep", "find", "ls"]) {
     const tool: any = pi.tools.get(name);
     assert.equal(tool.name, name);
     assert.equal(typeof tool.label, "string");
@@ -94,6 +96,16 @@ test("registers exactly read/write/edit, mirroring built-in schemas and docs", (
   const edit: any = pi.tools.get("edit");
   assert.deepEqual(Object.keys(edit.parameters.properties), ["path", "edits"]);
   assert.deepEqual(Object.keys(edit.parameters.properties.edits.items.properties), ["oldText", "newText"]);
+  // Search tools mirror the built-in schemas too; their path param is the
+  // optional search/list scope (verified against dist .d.ts).
+  const grep: any = pi.tools.get("grep");
+  assert.deepEqual(Object.keys(grep.parameters.properties), [
+    "pattern", "path", "glob", "ignoreCase", "literal", "context", "limit",
+  ]);
+  const find: any = pi.tools.get("find");
+  assert.deepEqual(Object.keys(find.parameters.properties), ["pattern", "path", "limit"]);
+  const ls: any = pi.tools.get("ls");
+  assert.deepEqual(Object.keys(ls.parameters.properties), ["path", "limit"]);
 });
 
 test("read: bare relative resolves against session cwd, @b/... against root b", async () => {
@@ -171,6 +183,62 @@ test("edit: @b/hello.txt is modified on disk with diff details", { timeout: 5000
   assert.equal(fs.readFileSync(path.join(rootB.path, "hello.txt"), "utf8"), "bravo hello\n");
   assert.equal(typeof result.details.diff, "string");
   assert.ok(result.details.patch.length > 0);
+});
+
+test("grep: @b searches only inside root b, never root a's same-named fixture", { timeout: 15000 }, async () => {
+  const { sessionDir, ws } = makeFixture();
+  // null note: assert raw search output, not first-touch behavior.
+  const { pi } = registeredTools(ws, sessionDir, null);
+  const grep: any = pi.tools.get("grep");
+  const ctx = mockCtx(sessionDir);
+  // Both roots hold a hello.txt, so a match text identifies which file was
+  // actually searched; session cwd holds no 'hello' at all.
+  const routedB = await grep.execute("c1", { pattern: "hello", path: "@b" }, undefined, undefined, ctx);
+  assert.ok(!routedB.isError);
+  assert.equal(routedB.content[0].text, "hello.txt:1: beta hello");
+  const routedA = await grep.execute("c2", { pattern: "hello", path: "@a" }, undefined, undefined, ctx);
+  assert.ok(!routedA.isError);
+  assert.equal(routedA.content[0].text, "hello.txt:1: alpha hello");
+  // A path inside the root that does not exist surfaces the built-in's
+  // error, proving the wrapper propagates rejections instead of swallowing
+  // them into empty results.
+  await assert.rejects(
+    grep.execute("c3", { pattern: "hello", path: "@b/nope" }, undefined, undefined, ctx),
+    /Path not found/,
+  );
+});
+
+test("find: @b locates the fixture file under root b only", { timeout: 15000 }, async () => {
+  const { sessionDir, rootB, ws } = makeFixture();
+  writeFile(rootB.path, "nested/beta-only.txt", "unique beta\n");
+  const { pi } = registeredTools(ws, sessionDir, null);
+  const find: any = pi.tools.get("find");
+  const ctx = mockCtx(sessionDir);
+  const routed = await find.execute("c1", { pattern: "beta-only.txt", path: "@b" }, undefined, undefined, ctx);
+  assert.ok(!routed.isError);
+  assert.equal(routed.content[0].text, "nested/beta-only.txt");
+  const control = await find.execute("c2", { pattern: "beta-only.txt", path: "@a" }, undefined, undefined, ctx);
+  assert.ok(!control.isError);
+  assert.equal(control.content[0].text, "No files found matching pattern");
+});
+
+test("ls: @b lists root-b entries only; omitted path keeps the built-in default", { timeout: 15000 }, async () => {
+  const { sessionDir, rootB, ws } = makeFixture();
+  writeFile(rootB.path, "beta-only.txt", "unique beta\n");
+  const { pi } = registeredTools(ws, sessionDir, null);
+  const ls: any = pi.tools.get("ls");
+  const ctx = mockCtx(sessionDir);
+  const routed = await ls.execute("c1", { path: "@b" }, undefined, undefined, ctx);
+  assert.ok(!routed.isError);
+  assert.equal(routed.content[0].text, "beta-only.txt\nhello.txt");
+  // The session file notes.txt must not leak into a root-b listing.
+  const routedA = await ls.execute("c2", { path: "@a" }, undefined, undefined, ctx);
+  assert.equal(routedA.content[0].text, "hello.txt");
+  // grep/find/ls have an OPTIONAL path: omitting it must behave exactly like
+  // the built-in default, i.e. list the session start directory.
+  const bare = await ls.execute("c3", {}, undefined, undefined, ctx);
+  assert.ok(!bare.isError);
+  assert.equal(bare.content[0].text, "notes.txt");
 });
 
 test("no active workspace: bare relative works unchanged, @root errors", async () => {
