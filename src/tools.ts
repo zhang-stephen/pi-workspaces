@@ -180,11 +180,14 @@ function makeBashExecute(deps: ToolDeps) {
     params: { command: string; timeout?: number; cwd?: string } & Record<string, any>,
     signal: AbortSignal | undefined,
     onUpdate: any,
-    _ctx: any,
+    ctx: any,
   ): Promise<any> => {
     const { cwd, ...bashParams } = params;
     let target: string;
     let root: RootInfo | null = null;
+    // Tracks whether params.cwd went through the workspace resolver; only in
+    // that case must ctx be withheld from the delegation (see below).
+    const usedResolver = cwd !== undefined;
     if (cwd === undefined) {
       // No cwd: run in the session start directory, exactly like the built-in.
       target = deps.sessionCwd();
@@ -205,12 +208,28 @@ function makeBashExecute(deps: ToolDeps) {
     // definition's execute prefers ctx.cwd over the factory-bound cwd
     // (verified against dist: resolveSpawnContext(resolvedCommand,
     // ctx?.cwd || cwd, ...)), so passing the runtime ctx through would
-    // silently discard the resolved target. The AgentTool signature carries
-    // no ctx, so the built-in falls back to exactly the cwd bound here.
+    // silently discard the resolved target. The two branches differ:
+    // - Resolver branch (cwd given): drop ctx, the factory-bound cwd is the
+    //   single source of truth for the working directory.
+    // - Default branch (no cwd): ctx.cwd === sessionCwd() === the factory's
+    //   bound cwd, so passing ctx changes nothing for the cwd but restores
+    //   the built-in's promptGuidelines contract (PI_* session env vars are
+    //   only injected when ctx is present; without ctx they get deleted).
     // bash is stateless (a fresh process per call), so a per-call factory
     // instance bound at the target directory is cheap and safe.
     const tool = createBashTool(target);
-    const result = await tool.execute(toolCallId, bashParams, signal, onUpdate);
+    // AgentTool's type-level execute omits the ctx param, but the runtime
+    // wrapper forwards it to the definition (verified against dist
+    // tool-definition-wrapper.js); type the delegation against that real
+    // 5-arg signature, same trick as FileToolDefinition above.
+    const execute = tool.execute as (
+      toolCallId: string,
+      params: any,
+      signal: AbortSignal | undefined,
+      onUpdate: any,
+      ctx: any,
+    ) => Promise<any>;
+    const result = await execute(toolCallId, bashParams, signal, onUpdate, usedResolver ? undefined : ctx);
     if (root) {
       const note = deps.onFirstTouch(root);
       if (note !== null) {

@@ -67,7 +67,13 @@ export function mockCtx(cwd: string, extra: Partial<ExtensionCommandContext> = {
     mode: "print",
     hasUI: false,
     cwd,
-    sessionManager: {} as ExtensionCommandContext["sessionManager"],
+    // Minimal sessionManager: the built-in bash tool dereferences
+    // getSessionId/getSessionFile whenever a ctx is passed through (env
+    // parity path), so the stub must be callable.
+    sessionManager: {
+      getSessionId: () => "test-session",
+      getSessionFile: () => undefined,
+    } as unknown as ExtensionCommandContext["sessionManager"],
     modelRegistry: {} as ExtensionCommandContext["modelRegistry"],
     model: undefined,
     scopedModels: [],
