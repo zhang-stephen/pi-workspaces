@@ -57,8 +57,10 @@ export function buildWorkspacePromptSection(ws: WorkspaceInfo, sessionCwd: strin
  * Enforces the once-per-root-per-session constraint injection: the first
  * onTouch of a root delegates to the injected read function and returns
  * its note; later touches of the same root (by name) return null.
- * reset() clears the memory on workspace load/unload. The read runs lazily
- * at touch time, so untouched roots cost nothing.
+ * The root is recorded as seen only after the read returns successfully,
+ * so a throwing read does not suppress a later retry. reset() clears the
+ * memory on workspace load/unload. The read runs lazily at touch time, so
+ * untouched roots cost nothing.
  */
 export class FirstTouchTracker {
   private readonly seen = new Set<string>();
@@ -70,8 +72,9 @@ export class FirstTouchTracker {
 
   onTouch(root: RootInfo): string | null {
     if (this.seen.has(root.name)) return null;
+    const note = this.read(root);
     this.seen.add(root.name);
-    return this.read(root);
+    return note;
   }
 
   reset(): void {
@@ -80,21 +83,46 @@ export class FirstTouchTracker {
 }
 
 /**
+ * Replace non-ASCII characters with '?' so injected notes stay pure ASCII
+ * even when an underlying error message is not.
+ */
+function sanitizeForAscii(text: string): string {
+  return text.replace(/[^\x00-\x7F]/g, "?");
+}
+
+/**
  * Build the constraint reader handed to FirstTouchTracker. For a root with
  * AGENTS.md (preferred) or CLAUDE.md, returns a marker line plus the file
  * contents; for a root with neither, returns a one-line fallback note
- * naming the primary root. getPrimaryName is consulted lazily, only when
- * the fallback fires, so the primary can change between calls.
+ * naming the primary root. A constraint file that exists but cannot be
+ * read (permissions, etc.) yields a WARNING note naming the root and the
+ * error instead of throwing; it deliberately does NOT fall back to the
+ * primary root's constraints, to avoid applying mismatched rules.
+ * getPrimaryName is consulted lazily, only when the fallback fires, so
+ * the primary can change between calls.
  */
 export function makeConstraintReader(getPrimaryName: () => string): (root: RootInfo) => string {
+  const readConstraints = (root: RootInfo, file: string, fileName: string): string => {
+    let contents: string;
+    try {
+      contents = fs.readFileSync(file, "utf8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return (
+        `[pi-workspaces] WARNING: constraints for root '${root.name}' (${file}) could not be read: ` +
+        `${sanitizeForAscii(message)}. Continuing without root-specific constraints.`
+      );
+    }
+    return `[pi-workspaces] Constraints for root '@${root.name}' (from ${fileName}):\n${contents}`;
+  };
   return (root: RootInfo): string => {
     const agentsPath = path.join(root.path, "AGENTS.md");
     const claudePath = path.join(root.path, "CLAUDE.md");
     if (fs.existsSync(agentsPath)) {
-      return `[pi-workspaces] Constraints for root '@${root.name}' (from AGENTS.md):\n${fs.readFileSync(agentsPath, "utf8")}`;
+      return readConstraints(root, agentsPath, "AGENTS.md");
     }
     if (fs.existsSync(claudePath)) {
-      return `[pi-workspaces] Constraints for root '@${root.name}' (from CLAUDE.md):\n${fs.readFileSync(claudePath, "utf8")}`;
+      return readConstraints(root, claudePath, "CLAUDE.md");
     }
     return (
       `[pi-workspaces] Root '@${root.name}' has no AGENTS.md or CLAUDE.md; no root-specific constraints. ` +

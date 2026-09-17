@@ -131,3 +131,31 @@ test("constraint reader prefers AGENTS.md over CLAUDE.md, else names the primary
   assert.ok(fallback.includes("'@alpha'"), "fallback note names the primary root");
   assert.equal(primaryCalls, 1, "getPrimaryName consulted once, only for the fallback");
 });
+
+test("constraint reader warns instead of throwing when the constraint file exists but is unreadable", () => {
+  const base = makeTempDir("pi-workspaces-constraints-warn-test-");
+  cleanup.push(base);
+
+  // A directory named AGENTS.md passes existsSync but makes readFileSync
+  // throw (EISDIR/EPERM on Windows), simulating an unreadable constraint
+  // file without chmod, which is unreliable on Windows.
+  const trickyDir = path.join(base, "tricky");
+  fs.mkdirSync(path.join(trickyDir, "AGENTS.md"), { recursive: true });
+
+  let primaryCalls = 0;
+  const read = makeConstraintReader(() => {
+    primaryCalls++;
+    return "alpha";
+  });
+
+  // Must not throw; the caller receives a WARNING note instead.
+  const note = read({ name: "tricky", path: trickyDir, exists: true });
+
+  assert.match(note, /^\[pi-workspaces\] WARNING: constraints for root 'tricky'/, "warning names the root");
+  assert.match(note, /could not be read: .+\./, "warning includes the error reason");
+  assert.ok(note.includes("Continuing without root-specific constraints."));
+  assert.ok(!note.includes("(from AGENTS.md)"), "no constraint contents are injected");
+  assert.ok(!note.includes("'@alpha'"), "must not fall back to the primary root's constraints");
+  assert.equal(primaryCalls, 0, "fallback primary lookup is not consulted");
+  assert.ok(!/[^\x00-\x7F]/.test(note), "warning must be pure ASCII");
+});
