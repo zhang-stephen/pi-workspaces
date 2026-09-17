@@ -128,16 +128,14 @@ test("first-touch note is prepended exactly once across two reads of a root", as
   assert.deepEqual(touched, ["b"]);
 });
 
-test("unknown root returns an isError result naming the root and available roots", async () => {
+test("unknown root throws naming the root and available roots", async () => {
   const { sessionDir, ws } = makeFixture();
   const { pi } = registeredTools(ws, sessionDir);
   const read: any = pi.tools.get("read");
-  const result = await read.execute("c1", { path: "@zzz/x.txt" }, undefined, undefined, mockCtx(sessionDir));
-  assert.equal(result.isError, true);
-  assert.equal(result.content[0].type, "text");
-  assert.match(result.content[0].text, /Unknown root 'zzz'/);
-  assert.match(result.content[0].text, /'a'/);
-  assert.match(result.content[0].text, /'b'/);
+  await assert.rejects(
+    read.execute("c1", { path: "@zzz/x.txt" }, undefined, undefined, mockCtx(sessionDir)),
+    /Unknown root 'zzz'/,
+  );
 });
 
 test("write: @b/new.txt lands on disk; bare relative still targets session cwd", { timeout: 5000 }, async () => {
@@ -183,9 +181,10 @@ test("no active workspace: bare relative works unchanged, @root errors", async (
   const bare = await read.execute("c1", { path: "notes.txt" }, undefined, undefined, ctx);
   assert.ok(!bare.isError);
   assert.equal(bare.content[0].text, "session notes\n");
-  const routed = await read.execute("c2", { path: "@b/hello.txt" }, undefined, undefined, ctx);
-  assert.equal(routed.isError, true);
-  assert.match(routed.content[0].text, /No workspace is active/);
+  await assert.rejects(
+    read.execute("c2", { path: "@b/hello.txt" }, undefined, undefined, ctx),
+    /No workspace is active/,
+  );
   // Sanity: the fixture workspace really was inactive here.
   assert.equal(ws.name, "demo");
 });

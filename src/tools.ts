@@ -82,9 +82,14 @@ function makeWorkspaceExecute(spec: FileToolSpec, deps: ToolDeps) {
     onUpdate: any,
     ctx: any,
   ): Promise<any> => {
-    const resolved = resolveWorkspacePath(String(params.path), deps.getActive(), deps.sessionCwd());
+    if (typeof params.path !== "string") throw new Error("params.path must be a string");
+    const resolved = resolveWorkspacePath(params.path, deps.getActive(), deps.sessionCwd());
     if (!resolved.ok) {
-      return { content: [{ type: "text", text: resolved.error }], isError: true };
+      // Throw, not an isError return: executeToolCall marks normal returns
+      // isError:false and drops return-object isError, while a throw is
+      // converted by the harness into the same content shape with
+      // isError:true and a transcript error entry.
+      throw new Error(resolved.error);
     }
     // Delegate on a factory instance bound at the resolved path, passing the
     // resolved absolute path. The base resolves absolute paths verbatim, so
