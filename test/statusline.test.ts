@@ -1,0 +1,94 @@
+// Unit tests for src/statusline.ts: the footer status renderer and the
+// setStatus refresh helper. renderStatus is pure (colors injected via fg);
+// refreshStatus only touches ctx.ui.setStatus / ctx.ui.theme.fg.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import type { WorkspaceInfo } from "../src/path-resolver.ts";
+import { renderStatus, refreshStatus } from "../src/statusline.ts";
+
+/** Recording fg: wraps text as <color:text> and remembers every call. */
+function makeFg(): { fg: (color: string, text: string) => string; calls: { color: string; text: string }[] } {
+  const calls: { color: string; text: string }[] = [];
+  const fg = (color: string, text: string): string => {
+    calls.push({ color, text });
+    return `<${color}:${text}>`;
+  };
+  return { fg, calls };
+}
+
+function ws(roots: [string, boolean][], name = "demo", primary = "alpha"): WorkspaceInfo {
+  return {
+    name,
+    roots: roots.map(([rname, exists], i) => ({ name: rname, path: `/ws/${rname}`, exists })),
+    primary,
+    origin: "project",
+  };
+}
+
+test("statusline: healthy format is '[ws] <name> (N roots) primary: <p>'", () => {
+  const healthy = ws([
+    ["alpha", true],
+    ["beta", true],
+    ["gamma", true],
+  ]);
+  const { fg, calls } = makeFg();
+
+  const text = renderStatus(healthy, fg);
+
+  assert.equal(text, "<accent:[ws]> <accent:demo> <dim:(3 roots)> <dim:primary: alpha>");
+  assert.deepEqual(
+    calls.map((c) => c.color),
+    ["accent", "accent", "dim", "dim"],
+    "icon and name use accent, counts and primary use dim",
+  );
+  assert.ok(!/[^\x00-\x7F]/.test(text), "status text must be pure ASCII");
+});
+
+test("statusline: degraded format shows ok/N counts and one warning per missing root", () => {
+  const degraded = ws([
+    ["alpha", true],
+    ["beta", false],
+    ["gamma", false],
+  ]);
+  const { fg, calls } = makeFg();
+
+  const text = renderStatus(degraded, fg);
+
+  assert.equal(
+    text,
+    "<accent:[ws]> <accent:demo> <dim:(1/3 roots)> <dim:primary: alpha>" +
+      "<warning: ! beta missing><warning: ! gamma missing>",
+  );
+  const warningCalls = calls.filter((c) => c.color === "warning");
+  assert.deepEqual(
+    warningCalls.map((c) => c.text),
+    [" ! beta missing", " ! gamma missing"],
+    "one warning-colored ' ! <name> missing' marker per missing root, in root order",
+  );
+  assert.ok(!/[^\x00-\x7F]/.test(text), "status text must be pure ASCII");
+});
+
+test("refreshStatus: sets keyed status when active, clears with undefined when inactive", () => {
+  const calls: { key: string; text: string | undefined }[] = [];
+  const ctx = {
+    ui: {
+      theme: { fg: (_color: unknown, text: string): string => text },
+      setStatus: (key: string, text: string | undefined): void => {
+        calls.push({ key, text });
+      },
+    },
+  };
+
+  refreshStatus(ctx, ws([
+    ["alpha", true],
+    ["beta", true],
+  ]));
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].key, "pi-workspaces");
+  assert.equal(calls[0].text, "[ws] demo (2 roots) primary: alpha");
+
+  refreshStatus(ctx, null);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].key, "pi-workspaces");
+  assert.equal(calls[1].text, undefined, "inactive workspace clears the status");
+});
