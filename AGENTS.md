@@ -31,7 +31,7 @@ node --test "test/**/*.ts"
 
 ```
 index.ts                 # Extension entry (ExtensionFactory, wiring only)
-src/workspace-store.ts   # Workspace definition & global config IO (dual-source scan, atomic writes)
+src/workspace-store.ts   # Workspace definition & plugin config IO (dual-source scan, atomic writes)
 src/path-resolver.ts     # @root/ path resolution (pure functions, no IO)
 src/tools.ts             # Overrides for the 7 built-in tools
 src/commands.ts          # /workspace slash commands
@@ -56,10 +56,11 @@ docs/                    # Design specs and docs (committed)
 
 - Global definitions: `~/.pi/agent/workspaces/*.json`
 - Project-level definitions: `<repo>/.pi/workspaces/*.json`
-- Global default config: `~/.pi/agent/pi-workspaces.json`
+- Global config: `~/.pi/agent/pi-workspaces.json`
+- Project config: `<repo>/.pi/pi-workspaces.json` (overrides the global config per key)
 - Session state: `pi.appendEntry()` (inside the session file)
 
 ## Commit Conventions
 
-- Conventional Commits with a scope naming the touched component: `feat(src):`, `fix(src):`, `test(test):`, `docs:`, English descriptions
+- Conventional Commits with a scope naming the touched component: `feat(commands):`, `fix(tools):`, `test(test):`, `docs:`, English descriptions
 - Run `node --test "test/**/*.ts"` before every commit

@@ -45,13 +45,13 @@ Loads only for sessions started inside that repository. Suitable for team-shared
 
 The extension detects how it was loaded and scopes all config access accordingly:
 
-| How it was loaded | Definition sources | Global defaults config | `/workspace create` writes to |
+| How it was loaded | Definition sources | Config file | `/workspace create` writes to |
 |---|---|---|---|
 | Global install (`~/.pi/agent/extensions/`) | global + project (merged by name) | read | global source |
 | Project install (`<repo>/.pi/extensions/`) | project only | never read | project source |
 | `pi -e <path>` (dev loop) | project only | never read | project source |
 
-A project-scoped load never reads or writes anything under `~/.pi/agent/` - not the workspace definitions, not the defaults config. Your personal global workspaces stay invisible to a repo-shared extension install, and the development loop (`pi -e ...`) behaves the same way. To develop against global definitions, install the extension globally for real.
+A project-scoped load never reads or writes anything under `~/.pi/agent/` - not the workspace definitions, not the config file. Your personal global workspaces stay invisible to a repo-shared extension install, and the development loop (`pi -e ...`) behaves the same way. To develop against global definitions, install the extension globally for real.
 
 ## Quick start
 
@@ -79,46 +79,40 @@ Definitions are JSON files, one workspace per file. A workspace is an **unordere
   "roots": [
     { "name": "backend",  "path": "C:/repos/backend" },
     { "name": "frontend", "path": "C:/repos/frontend" }
-  ],
-  "options": {
-    "activation": "auto",
-    "warnOnUnrelatedLoad": true
-  }
+  ]
 }
 ```
 
 - `name`: workspace name. Must match `^[A-Za-z0-9_-]+$` (letters, digits, `-`, `_`; no path separators).
-- `version`: schema version, currently `1`. Files with an unknown version are skipped with a warning.
+- `version`: schema version, currently `1`. Files with an unknown version are skipped silently at startup (visible via `/workspace list`).
 - `roots`: non-empty array of root objects. Each root has a `name` (same pattern, unique within the workspace) and an absolute `path`. Illegal or duplicate root names reject the whole definition. On Windows, write paths with forward slashes (`C:/repos/backend`) - JSON does not accept `\U`-style escapes, so backslash paths are invalid.
-- `options`: optional per-workspace overrides. Only `activation` (`"auto"` | `"prompt"`) and `warnOnUnrelatedLoad` (boolean) are recognized.
+- Definitions carry no options - the schema is `name`/`version`/`roots` only, and any other top-level key (including the removed `options`) rejects the file with the key named.
 
-Validation rejects malformed files with an explanatory error; a corrupt or incompatible file is skipped with a warning while the others load normally. All writes back to definition files are atomic (temp file + rename).
+Validation rejects malformed files with an explanatory error; at startup a corrupt or incompatible file is skipped **silently** - it surfaces through `/workspace list`, which re-scans and reports (broken files must not pollute unrelated sessions). All writes back to definition files are atomic (temp file + rename).
 
-### Options and the resolution chain
+### Config and the resolution chain
 
-Global default option values live in `~/.pi/agent/pi-workspaces.json`:
+The plugin config is one flat struct. The global file is `~/.pi/agent/pi-workspaces.json`; a project can override individual keys via `<project>/.pi/pi-workspaces.json`:
 
 ```json
 {
-  "defaults": {
-    "activation": "auto",
-    "warnOnUnrelatedLoad": true
-  },
+  "activation": "auto",
+  "warnOnUnrelatedLoad": true,
   "projectRootAscend": 3
 }
 ```
 
-Each workspace option resolves independently, workspace first, then the global defaults file, then the built-in value:
+Each key resolves independently, project first, then the global file, then the built-in value; a missing or wrong-typed value silently falls through:
 
 ```text
-workspace.options.<key>  ??  global defaults.<key>  ??  built-in default
+project config.<key>  ??  global config.<key>  ??  built-in default
 ```
 
 Built-in defaults: `activation: "auto"`, `warnOnUnrelatedLoad: true`, `projectRootAscend: 3`.
 
-- `activation`: `"auto"` loads the workspace silently when the session starts inside any of its roots; `"prompt"` asks first. When several workspaces contain the session directory, pi always asks (disambiguation), even if all of them say `"auto"`.
+- `activation`: `"auto"` loads the workspace silently when the session starts inside any of its roots; `"prompt"` asks first. When several workspaces contain the session directory, pi always asks (disambiguation), even if the config says `"auto"`. Activation is a property of the project/directory context - it cannot be set per workspace.
 - `warnOnUnrelatedLoad`: when `/workspace load` activates a workspace whose roots do not contain the session directory, warn that bare relative paths stay anchored at the session directory. The load proceeds either way.
-- `projectRootAscend` (global-only): the ascent cap for project-source discovery. It lives only in the global config - it controls how definitions are found, so per-workspace overrides would be circular, and project-scoped installs always use the built-in value.
+- `projectRootAscend` (global-only): the ascent cap for project-source discovery. It lives only in the global config - it controls how definitions are found, so a project-level override would be circular (a project-level value is ignored), and project-scoped installs always use the built-in value.
 
 ## Path syntax and bash cwd
 
@@ -142,9 +136,11 @@ Resolution failures are thrown as tool errors the model can see and self-correct
 
 At `session_start` the extension scans the definition sources visible to its install scope and then:
 
-1. **Auto-load**: if exactly one workspace contains the session directory (inside any root) and its `activation` resolves to `"auto"`, that workspace loads immediately.
+1. **Auto-load**: if exactly one workspace contains the session directory (inside any root) and the session config's `activation` resolves to `"auto"`, that workspace loads immediately. If the loaded workspace's name exists in both sources, an info line notes that the project definition wins.
 2. **Journal restore**: if the session is a `/resume`, the last recorded active workspace is re-activated. Repeated `session_start` events (e.g. extension reloads) never duplicate the journal entry.
-3. **Ask**: otherwise, if at least one workspace contains the session directory, pi prompts with exactly those workspaces plus a "Don't load" escape hatch - this covers `activation: "prompt"` workspaces and multi-match disambiguation. A session started outside every workspace root is **never** prompted - loading from an unrelated directory is always an explicit `/workspace load` (which warns by default, see `warnOnUnrelatedLoad`).
+3. **Ask**: otherwise, if at least one workspace contains the session directory, pi prompts with exactly those workspaces plus a "Don't load" escape hatch - this covers `activation: "prompt"` projects and multi-match disambiguation. A session started outside every workspace root is **never** prompted - loading from an unrelated directory is always an explicit `/workspace load` (which warns by default, see `warnOnUnrelatedLoad`).
+
+Broken definition files never produce startup warnings: diagnostics surface only when you run `/workspace list`, which re-scans and reports. The one exception tied to your directory: if the session directory matches only a **shadowed** definition (the losing side of a name collision), pi warns that the project source overrides it and loads nothing.
 
 Only one workspace can be active at a time; loading another replaces the current one (with a notification).
 
@@ -178,7 +174,7 @@ All commands work headless, which is also how this extension is smoke-tested. Tw
 A global install scans both sources at `session_start` and merges **by name**: a project definition overrides a global definition of the same name, and the project source wins per name. A wholesale override never happens - a project file cannot hide your unrelated global workspaces; they keep loading side by side. Project-scoped installs (project install or `-e` dev load) see only the project source, so no merging applies to them.
 
 - Each merged definition records its `origin` (`global` or `project`), shown by `/workspace list` and `/workspace status`.
-- A name collision triggers a one-time-per-session warning: "workspace 'X' from project overrides global".
+- Collision notices are relevance-gated: an info line ("the project definition wins") appears only when a collided workspace actually activates (auto-load, journal restore, prompt selection, `/workspace load`); a directory matching only the shadowed global copy warns without loading; everything else stays silent.
 
 ## Project-level install caveats
 
