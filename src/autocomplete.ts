@@ -1,10 +1,17 @@
 // Editor @root autocomplete provider. The pure helpers (parseAtToken,
 // completeRootNames, completeInRoot) are unit-tested; createAutocomplete
 // Provider stacks them on top of the built-in slash/path completion.
-// Task 12 registers the returned factory via ctx.ui.addAutocompleteProvider.
+// Interaction model (2026-09-19 redesign): "@" offers root switchers (bare
+// "name/" labels with absolute-path descriptions) plus the entries of the
+// current root (the root containing the session directory); a token whose
+// first segment names a root keeps the original explicit "@root/..."
+// drill-down; any other token is completed as a path inside the current
+// root. Labels never carry "@"; values always insert the explicit
+// "@rootname/path" form. index.ts registers the returned factory via
+// ctx.ui.addAutocompleteProvider.
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isInside, type RootInfo, type WorkspaceInfo } from "./path-resolver.ts";
+import { isInside, owningRoot, type RootInfo, type WorkspaceInfo } from "./path-resolver.ts";
 
 export interface CompletionItem {
   label: string;
@@ -82,7 +89,7 @@ export function completeInRoot(root: RootInfo, pathPart: string): CompletionItem
     }));
 }
 
-/** Split a stage-2 path part at its last separator: `dir` is listed, `fragment` filters. */
+/** Split a path part at its last separator: `dir` is listed, `fragment` filters. */
 function splitPathPart(pathPart: string): { dir: string; fragment: string } {
   const idx = Math.max(pathPart.lastIndexOf("/"), pathPart.lastIndexOf("\\"));
   if (idx === -1) return { dir: "", fragment: pathPart };
@@ -117,15 +124,29 @@ interface AutocompleteProviderOut {
   shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
 }
 
+/** Map a root's CompletionItems to provider items with explicit values. */
+function rootEntryItems(root: RootInfo, pathPart: string): AutocompleteItemOut[] {
+  const dir = splitPathPart(pathPart).dir.replace(/\\/g, "/");
+  const base = dir === "" ? `@${root.name}/` : `@${root.name}/${dir}/`;
+  return completeInRoot(root, pathPart).map((item) => ({
+    value: `${base}${item.label}`,
+    label: item.label,
+    description: item.description,
+  }));
+}
+
 /**
  * Build an AutocompleteProviderFactory layered on the built-in provider.
  * Non-@ input, or any @ input with no active workspace, delegates to the
  * built-in provider untouched. @ tokens with an active workspace are owned
- * by this layer: stage 1 suggests "@name" per root, stage 2 suggests entries
- * inside the named root. Unknown roots yield an empty list (an empty result
- * hides the popup) rather than fuzzy file matches from the built-in layer.
+ * by this layer: a token whose first segment names a root drills into that
+ * root explicitly; any other token completes inside the current root (the
+ * root containing the session cwd), with root switchers offered alongside
+ * on slash-free tokens. Unknown roots and root-less paths without a
+ * current root yield an empty list (an empty result hides the popup)
+ * rather than fuzzy file matches from the built-in layer.
  */
-export function createAutocompleteProvider(getActive: () => WorkspaceInfo | null): any {
+export function createAutocompleteProvider(getActive: () => WorkspaceInfo | null, sessionCwd: string): any {
   return (current: AutocompleteProviderOut): AutocompleteProviderOut => ({
     triggerCharacters: ["@"],
 
@@ -143,25 +164,31 @@ export function createAutocompleteProvider(getActive: () => WorkspaceInfo | null
       // separators are one char), so the built-in applyCompletion slices
       // the exact token off the line; value replaces it canonically.
       const prefix = `@${parsed.rootPart}${parsed.pathPart === null ? "" : `/${parsed.pathPart}`}`;
-      if (parsed.pathPart === null) {
-        const items = completeRootNames(ws, parsed.rootPart).map((item) => ({
-          value: `@${item.label}`,
-          label: item.label,
-          description: item.description,
-        }));
-        return { items, prefix };
+      // Explicit root: the segment before the first separator names a root
+      // verbatim - the original drill-down logic, untouched.
+      const explicitRoot =
+        parsed.pathPart === null ? undefined : ws.roots.find((candidate) => candidate.name === parsed.rootPart);
+      if (parsed.pathPart !== null && explicitRoot) {
+        return { items: rootEntryItems(explicitRoot, parsed.pathPart), prefix };
       }
-      const root = ws.roots.find((candidate) => candidate.name === parsed.rootPart);
-      if (!root) {
-        return { items: [], prefix };
+
+      const currentRoot = owningRoot(ws, sessionCwd);
+      if (parsed.pathPart !== null) {
+        // Root-less path ("@tex/ch" where tex is no root): complete inside
+        // the current root; without one there is nothing to offer.
+        if (!currentRoot) return { items: [], prefix };
+        return { items: rootEntryItems(currentRoot, `${parsed.rootPart}/${parsed.pathPart}`), prefix };
       }
-      const dir = splitPathPart(parsed.pathPart).dir.replace(/\\/g, "/");
-      const base = dir === "" ? `@${root.name}/` : `@${root.name}/${dir}/`;
-      const items = completeInRoot(root, parsed.pathPart).map((item) => ({
-        value: `${base}${item.label}`,
+
+      // Slash-free token: root switchers first, then the current root's
+      // top-level entries (A1). Both groups filter by the typed prefix.
+      const switchers = completeRootNames(ws, parsed.rootPart).map((item) => ({
+        value: `@${item.label}`,
         label: item.label,
+        description: item.description,
       }));
-      return { items, prefix };
+      const entries = currentRoot ? rootEntryItems(currentRoot, parsed.rootPart) : [];
+      return { items: [...switchers, ...entries], prefix };
     },
 
     applyCompletion(lines, cursorLine, cursorCol, item, prefix) {

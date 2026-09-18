@@ -88,7 +88,7 @@ test("createAutocompleteProvider delegates quoted @-mentions to the built-in pro
   // provider's fuzzy file matching must see it untouched.
   const marker = { items: [{ value: "doc.pdf", label: "doc.pdf" }], prefix: "@\"doc" };
   const current = makeStubCurrent(marker);
-  const provider = createAutocompleteProvider(() => makeWorkspace())(current as never);
+  const provider = createAutocompleteProvider(() => makeWorkspace(), "/unrelated")(current as never);
   const result = await provider.getSuggestions(["@\"doc"], 0, 5, { signal: new AbortController().signal });
   assert.equal(result, marker);
   assert.equal(current.calls, 1);
@@ -97,20 +97,111 @@ test("createAutocompleteProvider delegates quoted @-mentions to the built-in pro
 test("createAutocompleteProvider delegates when no workspace is active", async () => {
   const marker = { items: [{ value: "@anything", label: "@anything" }], prefix: "@a" };
   const current = makeStubCurrent(marker);
-  const provider = createAutocompleteProvider(() => null)(current as never);
+  const provider = createAutocompleteProvider(() => null, "/unrelated")(current as never);
   const result = await provider.getSuggestions(["@a"], 0, 2, { signal: new AbortController().signal });
   assert.equal(result, marker);
   assert.equal(current.calls, 1);
 });
 
-test("createAutocompleteProvider returns empty items for unknown roots in stage 2", async () => {
+test("createAutocompleteProvider returns empty items for root-less paths without a current root", async () => {
   const marker = { items: [{ value: "stub", label: "stub" }], prefix: "stub" };
   const current = makeStubCurrent(marker);
-  const provider = createAutocompleteProvider(() => makeWorkspace())(current as never);
+  // The cwd is outside every root, so "@zzz/x" (zzz is no root name) is a
+  // root-less path with no current root: nothing to offer, no delegation.
+  const provider = createAutocompleteProvider(() => makeWorkspace(), "/unrelated")(current as never);
   const result = await provider.getSuggestions(["@zzz/x"], 0, 6, { signal: new AbortController().signal });
-  // Empty items (no fuzzy fallthrough to the built-in layer), and no delegation.
   assert.deepEqual(result, { items: [], prefix: "@zzz/x" });
   assert.equal(current.calls, 0);
+});
+
+test("provider offers switchers plus current-root entries on a bare @", async () => {
+  const alpha = makeFixtureRoot();
+  try {
+    const ws: WorkspaceInfo = {
+      name: "demo",
+      origin: "project",
+      roots: [alpha, { name: "beta", path: "/ws/beta", exists: true }],
+    };
+    const sessionCwd = path.join(alpha.path, "src"); // inside alpha
+    const provider = createAutocompleteProvider(() => ws, sessionCwd)(makeStubCurrent(null) as never);
+    const result = await provider.getSuggestions(["@"], 0, 1, { signal: new AbortController().signal });
+
+    // Switchers first: bare "name/" labels, "@name/" values, absolute-path
+    // descriptions.
+    assert.deepEqual(result.items[0], { value: "@alpha/", label: "alpha/", description: alpha.path });
+    assert.deepEqual(result.items[1], { value: "@beta/", label: "beta/", description: "/ws/beta" });
+    // Then the current root's top-level entries with explicit values.
+    assert.deepEqual(result.items.slice(2), [
+      { value: "@alpha/many/", label: "many/", description: "many" },
+      { value: "@alpha/src/", label: "src/", description: "src" },
+      { value: "@alpha/zeta.txt", label: "zeta.txt", description: "zeta.txt" },
+    ]);
+    assert.equal(result.prefix, "@");
+  } finally {
+    fs.rmSync(alpha.path, { recursive: true, force: true });
+  }
+});
+
+test("provider offers switchers only when the cwd is inside no root", async () => {
+  const ws = makeWorkspace();
+  const provider = createAutocompleteProvider(() => ws, "/unrelated")(makeStubCurrent(null) as never);
+  const result = await provider.getSuggestions(["@"], 0, 1, { signal: new AbortController().signal });
+  assert.deepEqual(result.items, [{ value: "@alpha/", label: "alpha/", description: "/ws/alpha" }]);
+});
+
+test("provider completes root-less paths inside the current root", async () => {
+  const alpha = makeFixtureRoot();
+  try {
+    const ws: WorkspaceInfo = { name: "demo", origin: "project", roots: [alpha] };
+    const provider = createAutocompleteProvider(() => ws, alpha.path)(makeStubCurrent(null) as never);
+
+    // "@src/ut": src is not a root name, so the token is a path inside the
+    // current root - the value is rewritten to the explicit form (A4).
+    const result = await provider.getSuggestions(["@src/ut"], 0, 7, { signal: new AbortController().signal });
+    assert.deepEqual(result.items, [{ value: "@alpha/src/utils/", label: "utils/", description: "src/utils" }]);
+    assert.equal(result.prefix, "@src/ut");
+
+    // "@s": slash-free token - switchers (none match) plus the current
+    // root's matching top-level entries.
+    const single = await provider.getSuggestions(["@s"], 0, 2, { signal: new AbortController().signal });
+    assert.deepEqual(single.items, [{ value: "@alpha/src/", label: "src/", description: "src" }]);
+  } finally {
+    fs.rmSync(alpha.path, { recursive: true, force: true });
+  }
+});
+
+test("provider keeps the explicit-root drill-down behavior unchanged", async () => {
+  const alpha = makeFixtureRoot();
+  try {
+    const ws: WorkspaceInfo = { name: "demo", origin: "project", roots: [alpha] };
+    const provider = createAutocompleteProvider(() => ws, "/unrelated")(makeStubCurrent(null) as never);
+    const result = await provider.getSuggestions(["@alpha/src/ut"], 0, 13, { signal: new AbortController().signal });
+    assert.deepEqual(result.items, [{ value: "@alpha/src/utils/", label: "utils/", description: "src/utils" }]);
+    assert.equal(result.prefix, "@alpha/src/ut");
+  } finally {
+    fs.rmSync(alpha.path, { recursive: true, force: true });
+  }
+});
+
+test("provider keeps both groups when a root name collides with a current-root entry (A7)", async () => {
+  const alpha = makeFixtureRoot();
+  try {
+    // The workspace also has a root named "many"; the current root alpha
+    // has a top-level directory "many/".
+    const ws: WorkspaceInfo = {
+      name: "demo",
+      origin: "project",
+      roots: [alpha, { name: "many", path: "/ws/many", exists: true }],
+    };
+    const provider = createAutocompleteProvider(() => ws, alpha.path)(makeStubCurrent(null) as never);
+    const result = await provider.getSuggestions(["@ma"], 0, 3, { signal: new AbortController().signal });
+    assert.deepEqual(result.items, [
+      { value: "@many/", label: "many/", description: "/ws/many" },
+      { value: "@alpha/many/", label: "many/", description: "many" },
+    ]);
+  } finally {
+    fs.rmSync(alpha.path, { recursive: true, force: true });
+  }
 });
 
 /** Minimal AutocompleteProviderOut stub: getSuggestions returns `marker`. */

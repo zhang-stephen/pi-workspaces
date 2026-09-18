@@ -122,9 +122,10 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
     sessionCwd = ctx.cwd;
 
     // @root editor completion stacks on the built-in provider; only
-    // dialog-capable sessions have an editor to complete in.
+    // dialog-capable sessions have an editor to complete in. The session
+    // cwd pins the "current root" for implicit (root-less) completion.
     if (ctx.hasUI) {
-      ctx.ui.addAutocompleteProvider(createAutocompleteProvider(getActive));
+      ctx.ui.addAutocompleteProvider(createAutocompleteProvider(getActive, ctx.cwd));
     }
 
     const { merged, collisions, warnings } = loadAll(ctx.cwd, scope);
