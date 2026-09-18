@@ -111,15 +111,99 @@ function completeSubcommandArg(spec: SubcommandSpec, rest: string, deps: Command
   }
 }
 
-// Stubs - the implementations land in the next task (T5).
-function completeWorkspaceName(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
-  return null;
+/**
+ * `load` completes workspace names from the merged visible definitions,
+ * excluding the currently active one (loading it would be a no-op).
+ * Descriptions disambiguate origins: "project" for project definitions,
+ * the absolute definition-file path for global ones. Scope isolation (D1):
+ * project-scoped installs never see globals here. Exactly one argument -
+ * whitespace in `rest` means the argument is already complete.
+ */
+function completeWorkspaceName(spec: SubcommandSpec, rest: string, deps: CommandDeps): ArgumentItem[] | null {
+  if (/\s/.test(rest)) return null;
+  const activeName = deps.getActive()?.name;
+  const lower = rest.toLowerCase();
+  const items = loadAll(deps.getCwd(), deps.scope)
+    .merged.filter((m) => m.def.name !== activeName)
+    .filter((m) => m.def.name.toLowerCase().startsWith(lower))
+    .map((m) => ({
+      value: `${spec.name} ${m.def.name}`,
+      label: m.def.name,
+      description: m.origin === "project" ? "project" : path.join(globalWorkspacesDir(), `${m.def.name}.json`),
+    }));
+  return items.length > 0 ? items : null;
 }
-function completeRootName(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
-  return null;
+
+/** `remove` completes the active workspace's root names. */
+function completeRootName(spec: SubcommandSpec, rest: string, deps: CommandDeps): ArgumentItem[] | null {
+  if (/\s/.test(rest)) return null;
+  const ws = deps.getActive();
+  if (!ws) return null;
+  const lower = rest.toLowerCase();
+  const items = ws.roots
+    .filter((root) => root.name.toLowerCase().startsWith(lower))
+    .map((root) => ({ value: `${spec.name} ${root.name}`, label: root.name, description: root.path }));
+  return items.length > 0 ? items : null;
 }
-function completeAddArgs(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
-  return null;
+
+/** A token is a path when it contains a separator or a drive letter. */
+function looksLikePath(token: string): boolean {
+  return token.includes("/") || token.includes("\\") || /^[A-Za-z]:/.test(token);
+}
+
+const MAX_ARG_SUGGESTIONS = 50;
+
+/**
+ * `add [name] <path>` completes the path argument against the filesystem.
+ * With two or more tokens the last one is the path; a single token is a
+ * path only when it looks like one (otherwise it is the free-form name).
+ * Relative paths anchor at the session cwd; directories re-trigger with a
+ * trailing "/". Values rebuild the full argument text because pi replaces
+ * the whole argument prefix with the chosen item's value.
+ */
+function completeAddArgs(spec: SubcommandSpec, rest: string, deps: CommandDeps): ArgumentItem[] | null {
+  const tokens = rest.split(/\s+/);
+  let valuePrefix: string;
+  let pathPrefix: string;
+  if (tokens.length >= 2) {
+    valuePrefix = `${spec.name} ${tokens.slice(0, -1).join(" ")} `;
+    pathPrefix = tokens[tokens.length - 1];
+  } else if (looksLikePath(rest)) {
+    valuePrefix = `${spec.name} `;
+    pathPrefix = rest;
+  } else {
+    return null; // completing the optional name - free text
+  }
+  return completeFsPath(valuePrefix, pathPrefix, deps.getCwd());
+}
+
+/** Filesystem entries matching the fragment after the last separator. */
+function completeFsPath(valuePrefix: string, pathPrefix: string, cwd: string): ArgumentItem[] | null {
+  const sepIdx = Math.max(pathPrefix.lastIndexOf("/"), pathPrefix.lastIndexOf("\\"));
+  const dirPart = sepIdx === -1 ? "" : pathPrefix.slice(0, sepIdx);
+  const fragment = sepIdx === -1 ? pathPrefix : pathPrefix.slice(sepIdx + 1);
+  const baseDir = path.isAbsolute(pathPrefix)
+    ? dirPart === "" || /^[A-Za-z]:$/.test(dirPart)
+      ? path.parse(pathPrefix).root
+      : dirPart
+    : path.resolve(cwd, dirPart === "" ? "." : dirPart);
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(baseDir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  const typedDir = sepIdx === -1 ? "" : pathPrefix.slice(0, sepIdx + 1);
+  const lower = fragment.toLowerCase();
+  const items = entries
+    .filter((entry) => entry.name.toLowerCase().startsWith(lower))
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .slice(0, MAX_ARG_SUGGESTIONS)
+    .map((entry) => ({
+      value: `${valuePrefix}${typedDir}${entry.name}${entry.isDirectory() ? "/" : ""}`,
+      label: entry.isDirectory() ? `${entry.name}/` : entry.name,
+    }));
+  return items.length > 0 ? items : null;
 }
 
 function usage(scope: InstallScope): string {

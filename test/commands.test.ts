@@ -70,6 +70,141 @@ test("argument completion offers subcommands, trailing space for arg-taking ones
   }
 });
 
+test("argument completion: load offers visible workspaces minus the active one", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    // Global definition + project definition; the project one is active.
+    writeFile(agentDir, path.join("workspaces", "glob.json"), JSON.stringify({
+      name: "glob", version: 1, roots: [{ name: "g", path: cwd }],
+    }));
+    writeFile(cwd, path.join(".pi", "workspaces", "proj.json"), JSON.stringify({
+      name: "proj", version: 1, roots: [{ name: "p", path: cwd }],
+    }));
+
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => ({ name: "proj", roots: [{ name: "p", path: cwd, exists: true }], origin: "project" }),
+      setActive: () => {},
+      scope: "global",
+      getCwd: () => cwd,
+    });
+    const complete = (prefix: string) => (pi.commands.get("workspace") as any).getArgumentCompletions(prefix);
+
+    // The active workspace is excluded; the global one shows its absolute
+    // definition-file path as description.
+    assert.deepEqual(complete("load "), [
+      { value: "load glob", label: "glob", description: path.join(agentDir, "workspaces", "glob.json") },
+    ]);
+    // Prefix filter applies (case-insensitive).
+    assert.equal(complete("load PR"), null, "the active workspace is filtered out entirely");
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
+test("argument completion: load in project scope never sees globals (D1)", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(agentDir, path.join("workspaces", "glob.json"), JSON.stringify({
+      name: "glob", version: 1, roots: [{ name: "g", path: cwd }],
+    }));
+    writeFile(cwd, path.join(".pi", "workspaces", "proj.json"), JSON.stringify({
+      name: "proj", version: 1, roots: [{ name: "p", path: cwd }],
+    }));
+
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => null,
+      setActive: () => {},
+      scope: "project",
+      getCwd: () => cwd,
+    });
+    const complete = (prefix: string) => (pi.commands.get("workspace") as any).getArgumentCompletions(prefix);
+
+    assert.deepEqual(complete("load "), [{ value: "load proj", label: "proj", description: "project" }]);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
+test("argument completion: remove offers the active workspace's root names", async () => {
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  try {
+    const pi = mockPi();
+    const active = {
+      name: "demo",
+      origin: "project",
+      roots: [
+        { name: "backend", path: "/ws/backend", exists: true },
+        { name: "frontend", path: "/ws/frontend", exists: true },
+      ],
+    } as const;
+    registerWorkspaceCommands(pi, {
+      getActive: () => active as unknown as WorkspaceInfo,
+      setActive: () => {},
+      scope: "project",
+      getCwd: () => cwd,
+    });
+    const complete = (prefix: string) => (pi.commands.get("workspace") as any).getArgumentCompletions(prefix);
+
+    assert.deepEqual(complete("remove "), [
+      { value: "remove backend", label: "backend", description: "/ws/backend" },
+      { value: "remove frontend", label: "frontend", description: "/ws/frontend" },
+    ]);
+    assert.deepEqual(complete("remove fr"), [
+      { value: "remove frontend", label: "frontend", description: "/ws/frontend" },
+    ]);
+    // No active workspace: nothing to remove.
+    const pi2 = mockPi();
+    registerWorkspaceCommands(pi2, { getActive: () => null, setActive: () => {}, scope: "project", getCwd: () => cwd });
+    assert.equal((pi2.commands.get("workspace") as any).getArgumentCompletions("remove "), null);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
+test("argument completion: add completes filesystem paths", async () => {
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  try {
+    fs.mkdirSync(path.join(cwd, "frontend"));
+    fs.mkdirSync(path.join(cwd, "backend"));
+    fs.writeFileSync(path.join(cwd, "notes.txt"), "");
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => null,
+      setActive: () => {},
+      scope: "project",
+      getCwd: () => cwd,
+    });
+    const complete = (prefix: string) => (pi.commands.get("workspace") as any).getArgumentCompletions(prefix);
+
+    // Two tokens: the last one is the path; values rebuild the full argument.
+    assert.deepEqual(complete("add foo fr"), [
+      { value: "add foo frontend/", label: "frontend/" },
+    ]);
+    // A single token without separators is the free-form name.
+    assert.equal(complete("add foo"), null);
+    // A single token with a separator is a path.
+    const rel = complete("add ./fr");
+    assert.deepEqual(rel, [{ value: "add ./frontend/", label: "frontend/" }]);
+    // Unknown subcommand or completed args yield nothing.
+    assert.equal(complete("bogus x"), null);
+    assert.equal(complete("load a b"), null);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
 test("formatStatus shows name, origin and MISSING roots (no primary)", () => {
   const dir = makeTempDir();
   try {
