@@ -361,6 +361,19 @@ prefixes a scope letter ([u]/[p]/[t]); the extension name is rendered only for n
 sources ([u:npm:...]). The /workspace description therefore carries the attribution itself
 ("pi-workspaces: manage ...").
 
+FOLLOW-UP (2026-09-19, user feedback): the tag should show the extension name inside the brackets, like [u:npm:pi-markdown-preview]. Mechanism (verified in pi dist, `getAutocompleteSourceTag` in interactive-mode.js + `applyExtensionSourceInfo` in resource-loader.js):
+
+- The tag is rendered from the extension's `sourceInfo`, which pi assigns from **install metadata** - extensions cannot override it (no source field on registerCommand).
+- source "auto" (auto-discovered ~/.pi/agent/extensions/, incl. symlinks), "local" (settings.json `extensions` paths), "cli" (-e flag) -> bare scope letter: [u] / [p] / [t].
+- source "npm:<pkg>" -> [u:npm:<pkg>]; source "git:..." -> [u:git:<host>/<path>[@ref]].
+- Any other source string also collapses to the bare scope letter.
+
+pi-workspaces is currently symlinked into ~/.pi/agent/extensions/ -> source "auto" -> [u]. Options to get a named tag (next steps, pick one):
+
+1. **npm publish (chosen by the user)**: publish pi-workspaces to npm, then `pi install npm:pi-workspaces` -> [u:npm:pi-workspaces]. The installed copy is a production snapshot (`npm install --omit=dev`), so the dev symlink must be removed to avoid double-loading; day-to-day development continues via `pi -e` (tag [t]).
+2. **git install**: push the repo to a git host, `pi install git:<host>/<path>` -> [u:git:host/path]. Same snapshot semantics as npm.
+3. **Upstream pi change**: propose rendering a name for directory installs (e.g. the package.json name -> [u:pi-workspaces]). That is a pi feature request, outside this repo.
+
 ### 16.3 Command alias: add / remove
 
 RESOLVED (2026-09-19): `add` / `remove` are first-class aliases of `add-root` / `remove-root`;

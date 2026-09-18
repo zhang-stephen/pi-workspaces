@@ -24,7 +24,7 @@ test("parseAtToken extracts @tokens only at line start or after whitespace", () 
   assert.equal(parseAtToken(""), null);
 });
 
-test("completeRootNames filters roots by prefix and labels them @name", () => {
+test("completeRootNames offers switchers labeled name/ with absolute-path descriptions", () => {
   const ws: WorkspaceInfo = {
     name: "demo",
     origin: "project",
@@ -34,9 +34,21 @@ test("completeRootNames filters roots by prefix and labels them @name", () => {
       { name: "beta", path: "/ws/beta", exists: true },
     ],
   };
-  assert.deepEqual(completeRootNames(ws, "al"), [{ label: "@alpha" }, { label: "@alpine" }]);
-  assert.deepEqual(completeRootNames(ws, ""), [{ label: "@alpha" }, { label: "@alpine" }, { label: "@beta" }]);
+  assert.deepEqual(completeRootNames(ws, "al"), [
+    { label: "alpha/", description: "/ws/alpha" },
+    { label: "alpine/", description: "/ws/alpine" },
+  ]);
+  assert.deepEqual(completeRootNames(ws, ""), [
+    { label: "alpha/", description: "/ws/alpha" },
+    { label: "alpine/", description: "/ws/alpine" },
+    { label: "beta/", description: "/ws/beta" },
+  ]);
   assert.deepEqual(completeRootNames(ws, "zzz"), []);
+  // Case-insensitive prefix, following pi's own completion convention.
+  assert.deepEqual(completeRootNames(ws, "AL"), [
+    { label: "alpha/", description: "/ws/alpha" },
+    { label: "alpine/", description: "/ws/alpine" },
+  ]);
 });
 
 test("completeInRoot lists entries, skips node_modules/.git, caps at 50", () => {

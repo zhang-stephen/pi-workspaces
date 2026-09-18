@@ -8,6 +8,7 @@ import { isInside, type RootInfo, type WorkspaceInfo } from "./path-resolver.ts"
 
 export interface CompletionItem {
   label: string;
+  description?: string;
 }
 
 // Entries never offered: noisy, and rarely an intentional @root target.
@@ -33,11 +34,19 @@ export function parseAtToken(before: string): { rootPart: string; pathPart: stri
   return { rootPart: token.slice(0, sep), pathPart: token.slice(sep + 1) };
 }
 
-/** Stage 1: root names matching `prefix`, labeled "@name", in workspace order. */
+/**
+ * Root switchers: one item per root whose name matches `prefix`
+ * (case-insensitive, following pi's own completion convention). The label
+ * is the bare `name/` shown in the candidate list (the `@` exists only in
+ * user input; the trailing slash makes pi treat the item as a directory -
+ * accepting it re-triggers completion straight into the root). The
+ * description carries the root's absolute path.
+ */
 export function completeRootNames(ws: WorkspaceInfo, prefix: string): CompletionItem[] {
+  const lower = prefix.toLowerCase();
   return ws.roots
-    .filter((root) => root.name.startsWith(prefix))
-    .map((root) => ({ label: `@${root.name}` }));
+    .filter((root) => root.name.toLowerCase().startsWith(lower))
+    .map((root) => ({ label: `${root.name}/`, description: root.path }));
 }
 
 /**
@@ -129,8 +138,9 @@ export function createAutocompleteProvider(getActive: () => WorkspaceInfo | null
       const prefix = `@${parsed.rootPart}${parsed.pathPart === null ? "" : `/${parsed.pathPart}`}`;
       if (parsed.pathPart === null) {
         const items = completeRootNames(ws, parsed.rootPart).map((item) => ({
-          value: item.label,
+          value: `@${item.label}`,
           label: item.label,
+          description: item.description,
         }));
         return { items, prefix };
       }
