@@ -116,7 +116,7 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
     sessionCwd: getSessionCwd,
     onFirstTouch: (root, touchedPath) => tracker.onTouch(root, touchedPath),
   });
-  registerWorkspaceCommands(pi, { getActive, setActive, scope });
+  registerWorkspaceCommands(pi, { getActive, setActive, scope, getCwd: getSessionCwd });
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCwd = ctx.cwd;

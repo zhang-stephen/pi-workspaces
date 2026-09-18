@@ -40,6 +40,36 @@ function workspaceCmd(pi: ReturnType<typeof mockPi>): (args: string, ctx: unknow
   return cmd.handler as (args: string, ctx: unknown) => Promise<void>;
 }
 
+test("argument completion offers subcommands, trailing space for arg-taking ones", async () => {
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  try {
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => null,
+      setActive: () => {},
+      scope: "project",
+      getCwd: () => cwd,
+    });
+    const cmd = pi.commands.get("workspace");
+    assert.ok(cmd);
+    const complete = (prefix: string) =>
+      (cmd as any).getArgumentCompletions(prefix) as Array<{ value: string; label: string; description?: string }> | null;
+
+    // Bare prefix: all nine subcommands.
+    assert.equal(complete("")?.length, 9);
+    // Arg-taking subcommands get a trailing space so completion continues.
+    assert.deepEqual(complete("lo"), [{ value: "load ", label: "load", description: "Activate a workspace by name" }]);
+    assert.deepEqual(complete("unload"), [{ value: "unload", label: "unload", description: "Deactivate the active workspace" }]);
+    assert.deepEqual(complete("remove-"), [
+      { value: "remove-root ", label: "remove-root", description: "Remove a root from the active workspace" },
+    ]);
+    // Unknown subcommand text yields nothing.
+    assert.equal(complete("zzz"), null);
+  } finally {
+    cleanup(cwd);
+  }
+});
+
 test("formatStatus shows name, origin and MISSING roots (no primary)", () => {
   const dir = makeTempDir();
   try {
@@ -138,6 +168,7 @@ test("unload clears the active workspace via setActive(null, ctx)", async () => 
         clearedWithCtx = ctxArg;
       },
       scope: "global",
+      getCwd: () => cwd,
     };
     const pi = mockPi();
     registerWorkspaceCommands(pi, deps);
@@ -185,6 +216,7 @@ test("create persists a primary-free definition with the cwd as its sole root", 
         active = ws;
       },
       scope: "project",
+      getCwd: () => cwd,
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);
@@ -238,6 +270,7 @@ test("load of an unrelated workspace warns (default) and activates anyway", asyn
         active = ws;
       },
       scope: "project",
+      getCwd: () => cwd,
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);
@@ -278,6 +311,7 @@ test("load of an unrelated workspace stays silent with warnOnUnrelatedLoad: fals
         active = ws;
       },
       scope: "project",
+      getCwd: () => cwd,
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);
@@ -313,6 +347,7 @@ test("load of a workspace containing the cwd does not warn", async () => {
         active = ws;
       },
       scope: "project",
+      getCwd: () => cwd,
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);
@@ -356,6 +391,7 @@ test("add-root mutates the active workspace and persists the project JSON file",
         active = ws;
       },
       scope: "project",
+      getCwd: () => cwd,
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);

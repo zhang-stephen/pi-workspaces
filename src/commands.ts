@@ -35,6 +35,91 @@ export interface CommandDeps {
   setActive(ws: WorkspaceInfo | null, ctx?: any): void;
   /** Install scope: decides which definition sources are visible and where create persists. */
   scope: InstallScope;
+  /**
+   * The session cwd. Needed by argument completion, which pi calls without
+   * a command context (getArgumentCompletions receives the argument text
+   * only).
+   */
+  getCwd(): string;
+}
+
+/** Argument completion item. Structural - pi's AutocompleteItem comes from
+ * pi-tui, which this repo does not depend on. */
+interface ArgumentItem {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+type ArgKind = "none" | "workspace" | "root" | "create-name" | "add";
+
+interface SubcommandSpec {
+  name: string;
+  description: string;
+  args: ArgKind;
+}
+
+/** The subcommand table drives both dispatch docs and argument completion. */
+const SUBCOMMANDS: SubcommandSpec[] = [
+  { name: "status", description: "Show the active workspace status", args: "none" },
+  { name: "list", description: "List all workspace definitions from the visible sources", args: "none" },
+  { name: "load", description: "Activate a workspace by name", args: "workspace" },
+  { name: "unload", description: "Deactivate the active workspace", args: "none" },
+  { name: "create", description: "Create a workspace with the cwd as its sole root", args: "create-name" },
+  { name: "add", description: "Add a root to the active workspace (alias of add-root)", args: "add" },
+  { name: "add-root", description: "Add a root to the active workspace: [name] <path>", args: "add" },
+  { name: "remove", description: "Remove a root from the active workspace (alias of remove-root)", args: "root" },
+  { name: "remove-root", description: "Remove a root from the active workspace", args: "root" },
+];
+
+/**
+ * Argument completion for /workspace. pi calls this with the full text
+ * after the command name (e.g. "load de" for "/workspace load de") and the
+ * chosen item's value replaces that whole text - so every value rebuilds
+ * the complete argument string. The first argument completes subcommand
+ * names; arg-taking subcommands get a trailing space so completion
+ * continues into their arguments.
+ */
+function completeWorkspaceArgs(argumentPrefix: string, deps: CommandDeps): ArgumentItem[] | null {
+  const spaceIdx = argumentPrefix.search(/\s/);
+  if (spaceIdx === -1) {
+    const lower = argumentPrefix.toLowerCase();
+    const items = SUBCOMMANDS.filter((sub) => sub.name.startsWith(lower)).map((sub) => ({
+      value: sub.args === "none" ? sub.name : `${sub.name} `,
+      label: sub.name,
+      description: sub.description,
+    }));
+    return items.length > 0 ? items : null;
+  }
+  const spec = SUBCOMMANDS.find((sub) => sub.name === argumentPrefix.slice(0, spaceIdx).toLowerCase());
+  if (!spec) return null;
+  const rest = argumentPrefix.slice(spaceIdx + 1);
+  return completeSubcommandArg(spec, rest, deps);
+}
+
+/** Per-subcommand argument completion. */
+function completeSubcommandArg(spec: SubcommandSpec, rest: string, deps: CommandDeps): ArgumentItem[] | null {
+  switch (spec.args) {
+    case "workspace":
+      return completeWorkspaceName(spec, rest, deps);
+    case "root":
+      return completeRootName(spec, rest, deps);
+    case "add":
+      return completeAddArgs(spec, rest, deps);
+    default:
+      return null; // none / create-name: free text or no arguments
+  }
+}
+
+// Stubs - the implementations land in the next task (T5).
+function completeWorkspaceName(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
+  return null;
+}
+function completeRootName(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
+  return null;
+}
+function completeAddArgs(_spec: SubcommandSpec, _rest: string, _deps: CommandDeps): ArgumentItem[] | null {
+  return null;
 }
 
 function usage(scope: InstallScope): string {
@@ -120,6 +205,7 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
     // rendered only for npm/git package sources ([u:npm:...]).
     description:
       "pi-workspaces: manage multi-root workspaces (status, list, load, unload, create, add, remove)",
+    getArgumentCompletions: (argumentPrefix: string) => completeWorkspaceArgs(argumentPrefix, deps),
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
       const tokens = args
         .trim()
