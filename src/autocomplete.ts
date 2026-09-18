@@ -50,10 +50,12 @@ export function completeRootNames(ws: WorkspaceInfo, prefix: string): Completion
 }
 
 /**
- * Stage 2: entries inside "@root/<pathPart>". The fragment after the last
- * separator filters names within its directory; directories get a "/"
- * suffix, "node_modules"/".git" are skipped, results are sorted by name and
- * capped at 50. Any unreadable or nonexistent directory yields [].
+ * Entries inside a root for a given path part. The fragment after the last
+ * separator filters names within its directory (case-insensitive,
+ * following pi's own completion convention); directories get a "/"
+ * suffix, "node_modules"/".git" are skipped, results are sorted by name
+ * and capped at 50. Each item's description carries the path relative to
+ * the root. Any unreadable or nonexistent directory yields [].
  */
 export function completeInRoot(root: RootInfo, pathPart: string): CompletionItem[] {
   const { dir, fragment } = splitPathPart(pathPart);
@@ -67,12 +69,17 @@ export function completeInRoot(root: RootInfo, pathPart: string): CompletionItem
   } catch {
     return [];
   }
+  const relDir = dir.replace(/\\/g, "/");
+  const lower = fragment.toLowerCase();
   return entries
     .filter((entry) => !SKIPPED_ENTRIES.has(entry.name))
-    .filter((entry) => entry.name.startsWith(fragment))
+    .filter((entry) => entry.name.toLowerCase().startsWith(lower))
     .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     .slice(0, MAX_SUGGESTIONS)
-    .map((entry) => ({ label: entry.isDirectory() ? `${entry.name}/` : entry.name }));
+    .map((entry) => ({
+      label: entry.isDirectory() ? `${entry.name}/` : entry.name,
+      description: relDir === "" ? entry.name : `${relDir}/${entry.name}`,
+    }));
 }
 
 /** Split a stage-2 path part at its last separator: `dir` is listed, `fragment` filters. */

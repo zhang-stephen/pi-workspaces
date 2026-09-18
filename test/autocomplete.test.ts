@@ -54,15 +54,17 @@ test("completeRootNames offers switchers labeled name/ with absolute-path descri
 test("completeInRoot lists entries, skips node_modules/.git, caps at 50", () => {
   const root = makeFixtureRoot();
   try {
-    // Listing: directories get a "/" suffix, everything is sorted by name.
+    // Listing: directories get a "/" suffix, everything is sorted by name,
+    // and each item describes its path relative to the root.
     assert.deepEqual(completeInRoot(root, ""), [
-      { label: "many/" },
-      { label: "src/" },
-      { label: "zeta.txt" },
+      { label: "many/", description: "many" },
+      { label: "src/", description: "src" },
+      { label: "zeta.txt", description: "zeta.txt" },
     ]);
-    // The fragment filters within the last path segment only.
-    assert.deepEqual(completeInRoot(root, "s"), [{ label: "src/" }]);
-    assert.deepEqual(completeInRoot(root, "src/ut"), [{ label: "utils/" }]);
+    // The fragment filters within the last path segment only;
+    // case-insensitive, following pi's own completion convention.
+    assert.deepEqual(completeInRoot(root, "S"), [{ label: "src/", description: "src" }]);
+    assert.deepEqual(completeInRoot(root, "src/UT"), [{ label: "utils/", description: "src/utils" }]);
     // node_modules and .git never appear.
     const top = completeInRoot(root, "").map((item) => item.label);
     assert.ok(!top.includes("node_modules/"));
@@ -75,7 +77,7 @@ test("completeInRoot lists entries, skips node_modules/.git, caps at 50", () => 
     // The result is capped at 50 entries.
     const capped = completeInRoot(root, "many/");
     assert.equal(capped.length, 50);
-    assert.deepEqual(capped[0], { label: "file_00.txt" });
+    assert.deepEqual(capped[0], { label: "file_00.txt", description: "many/file_00.txt" });
   } finally {
     fs.rmSync(root.path, { recursive: true, force: true });
   }
