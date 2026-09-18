@@ -33,13 +33,23 @@ export function renderStatus(ws: WorkspaceInfo, fg: (color: string, text: string
 /**
  * Push (or clear) the footer status for the active workspace. Called with
  * null on unload / when no workspace is active, which clears the keyed
- * entry by passing undefined. No-op-friendly in headless modes: only
- * ctx.ui.setStatus and ctx.ui.theme.fg are touched.
+ * entry by passing undefined. No-op-friendly in headless modes: pi's
+ * print/RPC UI context exposes a no-op setStatus and may have no theme, in
+ * which case colors fall back to a passthrough. theme.fg is a class method
+ * on pi's Theme - it must be wrapped in a closure, because passing the bare
+ * reference detaches `this` and crashes on this.fgColors.
  */
 export function refreshStatus(ctx: any, ws: WorkspaceInfo | null): void {
+  const ui = ctx.ui;
+  if (!ui || typeof ui.setStatus !== "function") return;
   if (!ws) {
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    ui.setStatus(STATUS_KEY, undefined);
     return;
   }
-  ctx.ui.setStatus(STATUS_KEY, renderStatus(ws, ctx.ui.theme.fg));
+  const theme = ui.theme;
+  const fg =
+    theme && typeof theme.fg === "function"
+      ? (color: string, text: string): string => theme.fg(color, text)
+      : (_color: string, text: string): string => text;
+  ui.setStatus(STATUS_KEY, renderStatus(ws, fg));
 }

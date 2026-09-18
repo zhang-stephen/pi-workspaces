@@ -31,7 +31,30 @@ export function writeFile(root: string, rel: string, content: string): void {
  * Pass `extra` to override individual fields (e.g. a real sessionManager).
  */
 export function mockCtx(cwd: string, extra: Partial<ExtensionCommandContext> = {}): ExtensionCommandContext {
-  const theme = { fg: (_color: unknown, text: string): string => text };
+  // Class-based stubs on purpose: pi's Theme and SessionManager are classes
+  // whose methods dereference `this`. Extension code must call them bound -
+  // a detached `ctx.ui.theme.fg` or cached `getEntries` reference throws, and
+  // these stubs reproduce that (a plain arrow-function stub would not).
+  class MockTheme {
+    private fgColors = new Map<string, string>();
+    fg(_color: string, text: string): string {
+      void this.fgColors;
+      return text;
+    }
+  }
+  class MockSessionManager {
+    private fileEntries: unknown[] = [];
+    getSessionId(): string {
+      return "test-session";
+    }
+    getSessionFile(): undefined {
+      return undefined;
+    }
+    getEntries(): unknown[] {
+      return this.fileEntries;
+    }
+  }
+  const theme = new MockTheme();
   const ui = {
     select: async () => undefined,
     confirm: async () => false,
@@ -71,11 +94,7 @@ export function mockCtx(cwd: string, extra: Partial<ExtensionCommandContext> = {
     // getSessionId/getSessionFile whenever a ctx is passed through (env
     // parity path), so the stub must be callable. getEntries feeds the
     // journal-restore branch of session_start.
-    sessionManager: {
-      getSessionId: () => "test-session",
-      getSessionFile: () => undefined,
-      getEntries: () => [],
-    } as unknown as ExtensionCommandContext["sessionManager"],
+    sessionManager: new MockSessionManager() as unknown as ExtensionCommandContext["sessionManager"],
     modelRegistry: {} as ExtensionCommandContext["modelRegistry"],
     model: undefined,
     scopedModels: [],

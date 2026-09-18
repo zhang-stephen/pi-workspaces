@@ -52,10 +52,13 @@ function samePath(a: string, b: string): boolean {
 function journaledActiveName(ctx: {
   sessionManager?: { getEntries: () => unknown[] };
 }): string | null | undefined {
-  const getEntries = ctx.sessionManager?.getEntries;
-  if (!getEntries) return undefined;
+  // getEntries is a class method on pi's SessionManager - call it on the
+  // manager itself, because caching the bare reference detaches `this` and
+  // crashes on this.fileEntries.
+  const sm = ctx.sessionManager;
+  if (!sm || typeof sm.getEntries !== "function") return undefined;
   let name: string | null | undefined;
-  for (const raw of getEntries()) {
+  for (const raw of sm.getEntries()) {
     const entry = raw as { type?: string; customType?: string; data?: unknown } | null | undefined;
     if (entry?.type === "custom" && entry.customType === JOURNAL_TYPE) {
       const data = entry.data as { name?: unknown } | null | undefined;
