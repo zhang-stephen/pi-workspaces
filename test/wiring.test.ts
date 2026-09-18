@@ -2,7 +2,9 @@
 // the seven tool overrides and the /workspace command plus both event
 // handlers; session_start activates by containment (auto-load for a single
 // containing workspace with activation "auto", a select prompt otherwise,
-// never outside every root) and notifies warnings/collisions; setActive is
+// never outside every root) and stays silent about scan diagnostics (D1 of
+// the 2026-09-19 spec) while collision notices follow the relevance matrix
+// (D2); setActive is
 // the single journal point (pi-workspaces:active entries, deduped per
 // 16.5); before_agent_start appends the workspace section only while a
 // workspace is active; the @root autocomplete provider registers only on
@@ -117,7 +119,8 @@ test("session_start auto-loads the single containing workspace and journals it",
       roots: [{ name: "o", path: otherDir }],
     };
     writeFile(fx.agentDir, path.join("workspaces", "other.json"), JSON.stringify(otherDef));
-    // A corrupt file warns; a project definition colliding on "other" warns too.
+    // A corrupt file and a project definition colliding on "other" are both
+    // present; both must stay silent at startup (D1/D2).
     writeFile(fx.agentDir, path.join("workspaces", "broken.json"), "{ not json");
     writeFile(fx.cwd, path.join(".pi", "workspaces", "other.json"), JSON.stringify(otherDef));
 
@@ -138,9 +141,200 @@ test("session_start auto-loads the single containing workspace and journals it",
     );
     // The auto-load is announced.
     assert.ok(notes.some(([msg]) => msg.includes("'demo'") && /auto-loaded/i.test(msg)));
-    // Warnings and collisions are notified at warning level.
-    assert.ok(notes.some(([msg, level]) => level === "warning" && msg.includes("broken.json")));
-    assert.ok(notes.some(([msg, level]) => level === "warning" && msg.includes("'other'") && /both/i.test(msg)));
+    // Startup silence (2026-09-19 spec D1): the corrupt file and the
+    // "other" collision are unrelated to this session - no warning- or
+    // error-level notification at all. "demo" itself has no collision,
+    // so no collision info line either (D2).
+    assert.equal(notes.filter(([, level]) => level === "warning" || level === "error").length, 0);
+    assert.ok(!notes.some(([msg]) => msg.includes("also defined")));
+  } finally {
+    fx.restore();
+  }
+});
+
+test("session_start: activating a collided workspace appends the project-wins info line (Case A)", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // Both sources define "demo"; the project copy wins the merge and the
+    // cwd sits inside the project root, so the auto-load fires and the
+    // info line accompanies the activation notice.
+    const globalDir = makeTempDir("pi-workspaces-global-");
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: fx.cwd }],
+    }));
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: globalDir }],
+    }));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx, notes } = ctxCapturingUi(fx.cwd);
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "demo" }]);
+    assert.ok(notes.some(([msg]) => /auto-loaded/i.test(msg)));
+    assert.ok(
+      notes.some(([msg, level]) => level === "info" && msg.includes("'demo'") && /project definition wins/.test(msg)),
+      "the Case A info line accompanies the activation",
+    );
+    assert.equal(notes.filter(([, level]) => level === "warning" || level === "error").length, 0);
+    cleanup(globalDir);
+  } finally {
+    fx.restore();
+  }
+});
+
+test("session_start: cwd matching only the overridden global definition warns and stays inactive (Case B)", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // The shadowed global copy contains the cwd; the winning project copy
+    // does not. The merged workspace contains nothing, so the shadowed
+    // root is the only claim on the directory: warn, never activate.
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "new", path: path.join(fx.agentDir, "new-root") }],
+    }));
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: fx.cwd }],
+    }));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx, statuses, notes } = ctxCapturingUi(fx.cwd);
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.equal(pi.entries.size, 0, "nothing is activated, so nothing is journaled");
+    assert.ok(
+      statuses.some(([key, text]) => key === "pi-workspaces" && text === undefined),
+      "the statusline stays cleared",
+    );
+    assert.ok(
+      notes.some(
+        ([msg, level]) =>
+          level === "warning" &&
+          msg.includes("global definition of 'demo'") &&
+          /overrides it \(different roots\)/.test(msg),
+      ),
+      "the Case B warning names the overridden workspace",
+    );
+    assert.ok(!notes.some(([msg]) => /auto-loaded|restored|'demo' loaded/i.test(msg)));
+  } finally {
+    fx.restore();
+  }
+});
+
+test("session_start: cwd inside both sides of a collision activates with the info line (Case C)", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // The same directory is a root of both copies; the project copy wins,
+    // auto-loads, and Case C degrades to Case A (info line, no warning).
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: fx.cwd }],
+    }));
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: fx.cwd }],
+    }));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx, notes } = ctxCapturingUi(fx.cwd);
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "demo" }]);
+    assert.ok(notes.some(([msg]) => /auto-loaded/i.test(msg)));
+    assert.ok(notes.some(([msg, level]) => level === "info" && /project definition wins/.test(msg)));
+    assert.equal(notes.filter(([, level]) => level === "warning" || level === "error").length, 0);
+  } finally {
+    fx.restore();
+  }
+});
+
+test("session_start: journal restore of a collided workspace appends the info line", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // The cwd sits outside every root, so the journaled workspace comes
+    // back via the restore path; the collision info line follows it.
+    const elsewhere = makeTempDir("pi-workspaces-elsewhere-");
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: elsewhere }],
+    }));
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: path.join(fx.agentDir, "old-root") }],
+    }));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx, notes } = ctxCapturingUi(fx.cwd);
+    ctx.sessionManager.getEntries = () => [
+      { type: "custom", customType: "pi-workspaces:active", data: { name: "demo" } },
+    ] as unknown as ReturnType<typeof ctx.sessionManager.getEntries>;
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), undefined, "restore re-activation is journal-deduped");
+    assert.ok(notes.some(([msg]) => /restored from this session's journal/i.test(msg)));
+    assert.ok(notes.some(([msg, level]) => level === "info" && /project definition wins/.test(msg)));
+    cleanup(elsewhere);
+  } finally {
+    fx.restore();
+  }
+});
+
+test("session_start: selecting a collided workspace in the prompt appends the info line", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // activation "prompt" (per-workspace option at this stage) + collision:
+    // the user's selection activates with the Case A info line.
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      options: { activation: "prompt" },
+      roots: [{ name: "app", path: fx.cwd }],
+    }));
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: path.join(fx.agentDir, "old-root") }],
+    }));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const statuses: Array<[string, string | undefined]> = [];
+    const notes: Array<[string, "info" | "warning" | "error" | undefined]> = [];
+    const ctx = mockCtx(fx.cwd, { hasUI: true });
+    ctx.ui.setStatus = (key: string, text: string | undefined) => {
+      statuses.push([key, text]);
+    };
+    ctx.ui.notify = (msg: string, level?: "info" | "warning" | "error") => {
+      notes.push([msg, level]);
+    };
+    ctx.ui.select = async () => "demo";
+
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "demo" }]);
+    assert.ok(notes.some(([msg]) => msg.includes("'demo' loaded")));
+    assert.ok(notes.some(([msg, level]) => level === "info" && /project definition wins/.test(msg)));
+    assert.equal(notes.filter(([, level]) => level === "warning" || level === "error").length, 0);
   } finally {
     fx.restore();
   }

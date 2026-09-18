@@ -345,7 +345,7 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
     notify(ctx, usage(deps.scope), "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd, deps.scope);
+  const { merged, collisions } = loadAll(ctx.cwd, deps.scope);
   const entry = merged.find((m) => m.def.name === name);
   if (!entry) {
     notify(ctx, `Workspace '${name}' not found. Run /workspace list to see available workspaces.`, "error");
@@ -369,6 +369,12 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
     );
   }
   notify(ctx, formatStatus(ws));
+  // Collision relevance (2026-09-19 spec, D2 Case A): the info line
+  // accompanies only the activation of a collided workspace - the project
+  // copy just loaded is the winner, the global copy is ignored.
+  if (collisions.includes(name)) {
+    notify(ctx, `Workspace '${name}' is also defined in the global source; the project definition wins.`, "info");
+  }
 }
 
 function unloadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps): void {

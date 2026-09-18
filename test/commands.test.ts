@@ -432,6 +432,56 @@ test("load of an unrelated workspace warns (default) and activates anyway", asyn
   }
 });
 
+// Collision relevance (2026-09-19 spec, Case A): loading a workspace whose
+// name exists in both sources appends the project-wins info line.
+test("load of a collided workspace appends the project-wins info line", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: cwd }],
+    }));
+    writeFile(agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "old", path: path.join(agentDir, "old-root") }],
+    }));
+
+    let active: WorkspaceInfo | null = null;
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => active,
+      setActive: (ws) => {
+        active = ws;
+      },
+      scope: "global",
+      getCwd: () => cwd,
+    });
+    const { ctx, notes } = ctxCapturingNotify(cwd);
+    const handler = workspaceCmd(pi);
+
+    await handler("load demo", ctx);
+
+    assert.equal((active as WorkspaceInfo | null)?.name, "demo");
+    const info = notes.find(([msg]) => msg.includes("is also defined in the global source"));
+    assert.ok(info, "the collision info line is emitted");
+    assert.match(info[0], /'demo' is also defined in the global source/);
+    assert.equal(
+      notes.filter(([, level]) => level === "warning").length,
+      0,
+      "the cwd sits inside the winning roots, so no unrelated-load warning",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
 test("load of an unrelated workspace stays silent with warnOnUnrelatedLoad: false", async () => {
   const agentDir = makeTempDir("pi-workspaces-agent-");
   const cwd = makeTempDir("pi-workspaces-cwd-");

@@ -140,16 +140,19 @@ export function validateDefinition(data: unknown): ValidationResult {
 
 /**
  * Merge two definition sources per workspace name. Definitions that exist in
- * both sources are reported as collisions and the project copy wins; global
+ * both sources are reported as collisions and the project copy wins; the
+ * losing global copy is returned as `shadowed` so callers can gate collision
+ * notices on provable cwd relevance (2026-09-19 spec, D2). Global
  * definitions with no project counterpart survive untouched. Global entries
  * keep their source order, with project-only names appended in project order.
  */
 export function mergeByName(
   globalDefs: WorkspaceDefinition[],
   projectDefs: WorkspaceDefinition[],
-): { merged: LoadedDef[]; collisions: string[] } {
+): { merged: LoadedDef[]; shadowed: LoadedDef[]; collisions: string[] } {
   const merged: LoadedDef[] = globalDefs.map((def) => ({ def, origin: "global" as const }));
   const indexByName = new Map(merged.map((entry, i) => [entry.def.name, i]));
+  const shadowed: LoadedDef[] = [];
   const collisions: string[] = [];
   for (const def of projectDefs) {
     const i = indexByName.get(def.name);
@@ -157,11 +160,12 @@ export function mergeByName(
       indexByName.set(def.name, merged.length);
       merged.push({ def, origin: "project" });
     } else {
+      shadowed.push(merged[i]);
       merged[i] = { def, origin: "project" };
       collisions.push(def.name);
     }
   }
-  return { merged, collisions };
+  return { merged, shadowed, collisions };
 }
 
 /**
@@ -278,9 +282,10 @@ export function scanSource(
  * from the global defaults config in global scope (chicken-and-egg: the cap
  * controls how definitions are found), while project-scoped installs always
  * use the built-in value. Global scope scans both sources and merges per
- * name (project wins); warnings from both scans are concatenated and name
- * collisions are reported so callers can notify the user that the project
- * copy overrode the global. Project scope scans only the discovered project
+ * name (project wins); warnings from both scans are concatenated, and name
+ * collisions are reported together with the shadowed (losing) definition so
+ * callers can surface them relevance-gated (2026-09-19 spec, D2) instead of
+ * broadcasting at startup. Project scope scans only the discovered project
  * source, so collisions are impossible and the global directory is never
  * touched. The returned projectDir is the resolved project source
  * directory, so callers persisting project-origin definitions write back to
@@ -289,7 +294,7 @@ export function scanSource(
 export function loadAll(
   cwd: string,
   scope: InstallScope,
-): { merged: LoadedDef[]; collisions: string[]; warnings: string[]; projectDir: string } {
+): { merged: LoadedDef[]; shadowed: LoadedDef[]; collisions: string[]; warnings: string[]; projectDir: string } {
   const ascend =
     scope === "global"
       ? (loadGlobalConfig().projectRootAscend ?? DEFAULT_PROJECT_ROOT_ASCEND)
@@ -299,14 +304,21 @@ export function loadAll(
   if (scope === "project") {
     return {
       merged: projectScan.defs.map((def) => ({ def, origin: "project" as const })),
+      shadowed: [],
       collisions: [],
       warnings: projectScan.warnings,
       projectDir,
     };
   }
   const globalScan = scanSource(globalWorkspacesDir(), "global");
-  const { merged, collisions } = mergeByName(globalScan.defs, projectScan.defs);
-  return { merged, collisions, warnings: [...globalScan.warnings, ...projectScan.warnings], projectDir };
+  const { merged, shadowed, collisions } = mergeByName(globalScan.defs, projectScan.defs);
+  return {
+    merged,
+    shadowed,
+    collisions,
+    warnings: [...globalScan.warnings, ...projectScan.warnings],
+    projectDir,
+  };
 }
 
 /**

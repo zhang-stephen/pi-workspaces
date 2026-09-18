@@ -6,7 +6,11 @@
 //   session_start -> loadAll (sources depend on the install scope:
 //   global installs see global+project, anything else sees the project
 //   source only; the project source is discovered by marker ascent, D5)
-//   -> notify warnings/collisions -> auto-load when exactly one workspace
+//   -> silently skip scan diagnostics (2026-09-19 spec D1: they surface
+//   only via "/workspace list", never as startup broadcasts) -> collision
+//   notices bound to provable cwd relevance (D2: an info line when a
+//   collided workspace activates, a warning when the cwd matches only the
+//   overridden global definition) -> auto-load when exactly one workspace
 //   contains the session cwd and its activation resolves "auto" ->
 //   journal restore (session resume) -> select prompt when ctx.hasUI and
 //   at least one workspace contains the cwd (covers activation "prompt"
@@ -128,21 +132,19 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
       ctx.ui.addAutocompleteProvider(createAutocompleteProvider(getActive, ctx.cwd));
     }
 
-    const { merged, collisions, warnings } = loadAll(ctx.cwd, scope);
-    // Global defaults flow through resolveOptions per definition; the
-    // sparse config object itself is never read key-by-key. The global
-    // defaults config belongs to the global scope - a project-scoped
-    // install resolves options against the built-in defaults only.
+    const { merged, shadowed, collisions } = loadAll(ctx.cwd, scope);
+    // Scan diagnostics (corrupt/invalid definition files) are silently
+    // skipped (2026-09-19 spec D1): a broken file in an unrelated source
+    // must not pollute sessions that cannot even attribute it. The
+    // diagnostics remain visible via "/workspace list", which re-scans.
+    //
+    // Collision notices are relevance-gated (D2): the info line below
+    // accompanies only activations of a collided workspace.
     const globalDefaults = scope === "global" ? loadGlobalConfig().options : ({} as Partial<WorkspaceOptions>);
-    for (const warning of warnings) {
-      ctx.ui.notify(warning, "warning");
-    }
-    for (const name of collisions) {
-      ctx.ui.notify(
-        `Workspace '${name}' is defined in both the global and project sources; the project definition wins.`,
-        "warning",
-      );
-    }
+    const collisionNotice = (name: string): string | undefined =>
+      collisions.includes(name)
+        ? `Workspace '${name}' is also defined in the global source; the project definition wins.`
+        : undefined;
 
     // The containing set (D4): definitions where the session cwd sits
     // inside any root. A cwd outside every root activates nothing and is
@@ -157,6 +159,8 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
       const ws = toWorkspaceInfo(def, origin);
       setActive(ws, ctx);
       ctx.ui.notify(`Workspace '${ws.name}' auto-loaded (session directory is inside its roots).`);
+      const notice = collisionNotice(ws.name);
+      if (notice) ctx.ui.notify(notice, "info");
       return;
     }
 
@@ -173,7 +177,24 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
         const ws = toWorkspaceInfo(entry.def, entry.origin);
         setActive(ws, ctx);
         ctx.ui.notify(`Workspace '${ws.name}' restored from this session's journal.`);
+        const notice = collisionNotice(ws.name);
+        if (notice) ctx.ui.notify(notice, "info");
         return;
+      }
+    }
+
+    // Case B of the collision matrix: the cwd matches only the shadowed
+    // (overridden) global definition. Relevance here is provable - say so
+    // instead of staying silent - but never activate it: the merged result
+    // no longer contains the losing copy.
+    if (containing.length === 0) {
+      const overridden = shadowed.find(({ def }) => def.roots.some((r) => isInside(r.path, ctx.cwd)));
+      if (overridden) {
+        ctx.ui.notify(
+          `Directory matches the global definition of '${overridden.def.name}', ` +
+            `but the project source overrides it (different roots); not loaded.`,
+          "warning",
+        );
       }
     }
 
@@ -190,6 +211,8 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
           const ws = toWorkspaceInfo(entry.def, entry.origin);
           setActive(ws, ctx);
           ctx.ui.notify(`Workspace '${ws.name}' loaded.`);
+          const notice = collisionNotice(ws.name);
+          if (notice) ctx.ui.notify(notice, "info");
           return;
         }
       }

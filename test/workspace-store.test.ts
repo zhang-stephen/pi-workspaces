@@ -141,12 +141,16 @@ test("mergeByName: project wins, global-only names survive, collisions reported"
   };
   const projectOnly: WorkspaceDefinition = { ...VALID, name: "project-only" };
 
-  const { merged, collisions } = mergeByName(
+  const { merged, shadowed, collisions } = mergeByName(
     [globalOnly, sharedGlobal],
     [sharedProject, projectOnly],
   );
 
   assert.deepEqual(collisions, ["shared"]);
+  // The losing global copy is retained as shadowed for relevance-gated
+  // collision notices (2026-09-19 spec, D2).
+  assert.deepEqual(shadowed.map((s) => [s.def.name, s.origin] as const), [["shared", "global"]]);
+  assert.equal(shadowed[0].def, sharedGlobal);
   assert.deepEqual(
     merged.map((m) => [m.def.name, m.origin] as const),
     [
