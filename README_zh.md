@@ -10,9 +10,9 @@
 
 - **多根文件工具。** 内置的 `read`、`write`、`edit`、`grep`、`find`、`ls` 工具新增 `@根名/` 路径前缀，可以把调用路由到任意工作区根。工具的其他行为（渲染、写入串行化、结果结构）完全继承内置实现。
 - **跨根 shell。** `bash` 工具新增可选 `cwd` 参数，接受绝对路径或 `@根名/子目录`，命令会在该根内启动。pi 每次调用都会新建 shell 进程，因此按调用指定 cwd 是安全的。
-- **提示词注入。** 工作区激活期间，系统提示词会追加一个工作区块（根目录映射并标注主根、语法规则、bash 用法、约束策略）。会话中首次触达某个根时，该根的 AGENTS.md / CLAUDE.md 会追加到工具结果中（每根每会话一次）；没有自己约束文件的根会回退到主根的约束文件。
+- **提示词注入。** 工作区激活期间，系统提示词会追加一个工作区块（根目录映射、语法规则、bash 用法、约束策略）。会话中首次触达某个根时，该根的 AGENTS.md / CLAUDE.md 会追加到工具结果中（每根每会话一次）；没有自己约束文件的根会回退到会话根（包含会话目录的根）的约束文件；读取约束文件本身时不会重复注入。
 - **编辑器自动补全。** 在输入框敲 `@` 会列出根名；输入 `@根名/` 后补全该根内的文件和目录路径。其他输入一律委托给 pi 的内置补全。（补全只服务于你手动输入的路径 —— 模型生成工具调用路径时不经过它。）
-- **底部状态栏。** 状态栏常驻显示当前工作区：`[ws] my-workspace (3 roots) primary: backend`。当某个根目录在磁盘上缺失时状态会降级显示：`[ws] my-workspace (2/3 roots) primary: backend ! frontend missing`。没有激活工作区时该条目自动清除。
+- **底部状态栏。** 状态栏常驻显示当前工作区：`[ws] my-workspace (3 roots)`。当某个根目录在磁盘上缺失时状态会降级显示：`[ws] my-workspace (2/3 roots) ! frontend missing`。没有激活工作区时该条目自动清除。
 - **会话状态持久化。** 激活的工作区会写入会话日志文件，因此 `/resume` 恢复会话时会自动还原。
 - **对无头模式友好。** 所有 `/workspace` 命令在 RPC 模式下可用，交互式通知会以 JSON 事件形式输出 —— 可用于脚本化和自动化冒烟测试。
 
@@ -56,19 +56,19 @@
 ## 快速开始
 
 ```text
-/workspace create my-project     # 当前目录成为主根
+/workspace create my-project     # 当前目录成为第一个根
 /workspace add-root frontend C:/repos/frontend
 /workspace add-root backend C:/repos/backend
 ```
 
-或者手写定义文件（格式见下文）放到 `~/.pi/agent/workspaces/`（全局、个人）或 `<repo>/.pi/workspaces/`（项目级、可随 git 共享）。然后在任意根目录里启动 pi —— 或使用 `/workspace load my-project`。
+或者手写定义文件（格式见下文）放到 `~/.pi/agent/workspaces/`（全局、个人）或项目内的 `.pi/workspaces/`（可随 git 共享）。然后在任意根目录里启动 pi —— 或使用 `/workspace load my-project`。
 
 ## 工作区定义
 
-定义为 JSON 文件，一个文件一个工作区：
+定义为 JSON 文件，一个文件一个工作区。工作区是**无序的等值根集合** —— 没有主根概念：
 
 - 全局来源：`~/.pi/agent/workspaces/<名字>.json`（仅全局安装可见）
-- 项目来源：`<repo>/.pi/workspaces/<名字>.json`（所有安装作用域可见）
+- 项目来源：被发现的项目目录下的 `.pi/workspaces/<名字>.json`（所有安装作用域可见）。项目目录通过**标记上溯**发现：从会话目录向上最多走 `projectRootAscend` 层（内置默认 3），停在第一个包含 `.pi`、`.git` 或 `.agents` 标记的目录。最近的标记目录胜出，即使它没有 `.pi/workspaces` 子目录（此时项目来源为空）；发现永远不会上溯越过用户主目录，层数内没有标记时使用会话目录本身。
 
 ### 格式
 
@@ -80,10 +80,9 @@
     { "name": "backend",  "path": "C:/repos/backend" },
     { "name": "frontend", "path": "C:/repos/frontend" }
   ],
-  "primary": "backend",
   "options": {
-    "autoLoadInPrimary": true,
-    "promptInOtherDirs": true
+    "activation": "auto",
+    "warnOnUnrelatedLoad": true
   }
 }
 ```
@@ -91,8 +90,7 @@
 - `name`：工作区名称。必须匹配 `^[A-Za-z0-9_-]+$`（字母、数字、`-`、`_`；不允许路径分隔符）。
 - `version`：格式版本，当前为 `1`。版本未知的文件会被跳过并给出警告。
 - `roots`：非空根对象数组。每个根有 `name`（同样规则，工作区内唯一）和绝对路径 `path`。根名非法或重复会导致整个定义被拒绝。Windows 下请用正斜杠写路径（`C:/repos/backend`）—— JSON 不接受 `\U` 这类转义，反斜杠路径是非法的。
-- `primary`：必须指向已声明的某个根。主根的 AGENTS.md / CLAUDE.md 会作为其他没有约束文件的根的回退约束。
-- `options`：可选的按工作区覆盖项。只识别 `autoLoadInPrimary` 和 `promptInOtherDirs`，且必须是布尔值。
+- `options`：可选的按工作区覆盖项。只识别 `activation`（`"auto"` | `"prompt"`）和 `warnOnUnrelatedLoad`（布尔值）。
 
 校验会以带说明的错误拒绝格式错误的文件；损坏或不兼容的文件会被跳过并给出警告，其余文件正常加载。所有对定义文件的写回都是原子的（临时文件 + 重命名）。
 
@@ -103,22 +101,24 @@
 ```json
 {
   "defaults": {
-    "autoLoadInPrimary": true,
-    "promptInOtherDirs": true
-  }
+    "activation": "auto",
+    "warnOnUnrelatedLoad": true
+  },
+  "projectRootAscend": 3
 }
 ```
 
-每个选项独立解析：先看工作区定义，再看全局默认文件，最后看内置默认值：
+每个工作区选项独立解析：先看工作区定义，再看全局默认文件，最后看内置默认值：
 
 ```text
 workspace.options.<键>  ??  全局 defaults.<键>  ??  内置默认值
 ```
 
-内置默认值：`autoLoadInPrimary: true`、`promptInOtherDirs: true`。
+内置默认值：`activation: "auto"`、`warnOnUnrelatedLoad: true`、`projectRootAscend: 3`。
 
-- `autoLoadInPrimary`：会话在某工作区主根内启动时，直接加载该工作区，不再询问。
-- `promptInOtherDirs`：会话在该工作区的*非主根*内启动时，在加载询问中列出该工作区。在所有根之外启动的会话绝不弹窗，无一例外。
+- `activation`：`"auto"` 表示会话在该工作区任意根内启动时静默加载；`"prompt"` 表示先询问。当多个工作区同时包含会话目录时一定弹窗（消除歧义），即使它们都是 `"auto"`。
+- `warnOnUnrelatedLoad`：`/workspace load` 激活一个根不包含会话目录的工作区时发出警告（裸相对路径仍锚定在会话目录）。无论是否警告，加载都会执行。
+- `projectRootAscend`（仅全局）：项目来源发现的上溯层数上限。它只能放在全局配置里 —— 它控制定义如何被发现，按工作区覆盖会造成循环；项目级作用域的安装总是使用内置值。
 
 ## 路径语法与 bash cwd
 
@@ -142,9 +142,9 @@ bash(command: "pwd")                 # 会话启动目录
 
 `session_start` 时扩展扫描其安装作用域可见的定义来源，然后：
 
-1. **自动加载**：如果会话目录等于某工作区的主根，且其 `autoLoadInPrimary` 解析为真，立即加载该工作区。
-2. **日志恢复**：如果会话是 `/resume` 恢复而来，重新激活上次记录的工作区。
-3. **询问**：否则，如果会话目录位于某工作区的*非主根*内，且该工作区的 `promptInOtherDirs` 解析为真，弹出选择列表，只列出包含该目录的工作区，并带"不加载"逃生项。在所有工作区根之外启动的会话**绝不弹窗** —— 从无关目录加载只能显式执行 `/workspace load`。
+1. **自动加载**：如果恰好有一个工作区包含会话目录（任意根内）且其 `activation` 解析为 `"auto"`，立即加载该工作区。
+2. **日志恢复**：如果会话是 `/resume` 恢复而来，重新激活上次记录的工作区。`session_start` 重复触发（如扩展重载）不会重复写日志。
+3. **询问**：否则，如果至少一个工作区包含会话目录，弹出选择列表，只列出这些工作区，并带"不加载"逃生项 —— 涵盖 `activation: "prompt"` 的工作区和多匹配消歧。在所有工作区根之外启动的会话**绝不弹窗** —— 从无关目录加载只能显式执行 `/workspace load`（默认会警告，见 `warnOnUnrelatedLoad`）。
 
 同一时间只能激活一个工作区；加载另一个会替换当前的（并有通知提示）。
 
@@ -154,13 +154,13 @@ bash(command: "pwd")                 # 会话启动目录
 
 | 命令 | 行为 |
 |------|------|
-| `/workspace`（或 `status`） | 显示当前工作区：名称、来源、主根，以及每个根（目录缺失时带 `(MISSING)` 标记）。 |
-| `/workspace list` | 列出两个来源的全部定义，各自标注 `origin`（`global` 或 `project`）和主根。 |
-| `/workspace load <名字>` | 按名称激活工作区。 |
+| `/workspace`（或 `status`） | 显示当前工作区：名称、来源，以及每个根（目录缺失时带 `(MISSING)` 标记）。 |
+| `/workspace list` | 列出两个来源的全部定义，各自标注 `origin`（`global` 或 `project`）。 |
+| `/workspace load <名字>` | 按名称激活工作区。根不包含会话目录时发出警告（`warnOnUnrelatedLoad`），但加载仍会执行。 |
 | `/workspace unload` | 卸载当前工作区；状态栏随之清除。 |
-| `/workspace create <名字>` | 以当前目录为唯一主根创建定义并激活。写入与安装作用域匹配的来源（全局安装写全局来源；其余写项目来源）。 |
+| `/workspace create <名字>` | 以当前目录为唯一根创建定义并激活。写入与安装作用域匹配的来源（全局安装写全局来源；其余写项目来源）。 |
 | `/workspace add [名字] <路径>` | 给当前工作区添加根（别名：`add-root`）。名字可省略（默认取目录 basename）；相对路径锚定在会话目录。定义会持久化写回其来源。 |
-| `/workspace remove <名字>` | 从当前工作区移除根并持久化（别名：`remove-root`）。主根不可移除。 |
+| `/workspace remove <名字>` | 从当前工作区移除根并持久化（别名：`remove-root`）。最后一个根不可移除。 |
 
 交互式参数选择器（例如无参数 `load` 时的模糊选择器）属于 MVP 之后的功能 —— 目前缺参数时会打印用法说明。
 
@@ -170,7 +170,7 @@ bash(command: "pwd")                 # 会话启动目录
 
 - **观察命令输出请用 RPC 模式。** print 模式（`pi -p`）下 `ctx.ui.notify` 是空操作，命令输出不可见。RPC 模式（`pi --mode rpc`）下，每条通知和状态栏更新都会作为 JSON 事件发出：`printf '%s\n' '{"type":"prompt","message":"/workspace list"}' | pi --mode rpc`。
 - **Windows / Git Bash 参数改写。** 把斜杠命令作为参数传入时（如 `pi -p "/workspace list"`），MSYS 路径转换会把 `/workspace` 改写成 `C:/Program Files/Git/workspace`。请先设置 `MSYS_NO_PATHCONV=1`（或 `MSYS2_ARG_CONV_EXCL="*"`）。
-- **无头模式没有询问弹窗。** 选择列表激活需要 UI；无头会话请依赖自动加载（在主根目录启动 pi）或日志恢复（`-c` / `/resume`）。`pi -c` 会忽略没有任何消息的会话文件。
+- **无头模式没有询问弹窗。** 选择列表激活需要 UI；无头会话请依赖自动加载（在 `activation: "auto"` 工作区的任意根内启动 pi）或日志恢复（`-c` / `/resume`）。`pi -c` 会忽略没有任何消息的会话文件。
 - **管道喂入的 RPC prompt 不会串行执行。** pi 不会等上一条管道输入的命令处理器执行完再开始下一条，因此同一批背靠背的修改类命令可能在定义文件上发生竞争。修改类命令请一次发一条（交互使用不受影响）。
 
 ## 定义如何合并
@@ -185,14 +185,14 @@ bash(command: "pwd")                 # 会话启动目录
 项目级安装有两个后果，都是预期行为而非 bug：
 
 - **发现机制**：pi 从会话自身目录发现项目扩展，因此仅当会话从该仓库内启动时才加载。从其他目录启动的会话 —— 包括从同一工作区另一个根启动 —— 没有自动加载、询问弹窗、工具覆盖和状态栏。希望扩展随处可用请用全局安装。
-- **隔离性**：项目级安装（与 `-e` 开发加载一样）是项目级作用域：只能看到 `<repo>/.pi/workspaces/`，从不读写 `~/.pi/agent/` 下的全局配置。仓库共享的扩展无法窥探你的个人工作区。
+- **隔离性**：项目级安装（与 `-e` 开发加载一样）是项目级作用域：只能看到被发现的项目来源（最近标记目录下的 `.pi/workspaces/`），从不读写 `~/.pi/agent/` 下的全局配置。仓库共享的扩展无法窥探你的个人工作区。
 
 ## 运行时存储位置
 
 | 内容 | 位置 |
 |------|------|
 | 全局定义 | `~/.pi/agent/workspaces/*.json`（仅全局安装可见） |
-| 项目定义 | `<repo>/.pi/workspaces/*.json`（所有安装作用域可见） |
+| 项目定义 | 被发现的项目目录下 `.pi/workspaces/*.json`（所有安装作用域可见） |
 | 全局默认选项 | `~/.pi/agent/pi-workspaces.json`（仅全局安装读取） |
 | 激活工作区日志 | pi 会话文件内（自定义条目 `pi-workspaces:active`） |
 
@@ -201,18 +201,15 @@ bash(command: "pwd")                 # 会话启动目录
 - **显式 `cwd` 会丢失会话环境变量。** 带显式 `cwd` 的 `bash` 调用不会注入 `PI_*` 会话环境变量（把运行时 ctx 传过去会覆盖已解析的目录）。不带 `cwd` 的调用 —— 即默认分支 —— 会正常注入。
 - **符号链接的定义文件会被跳过。** 来源扫描只接受普通 `.json` 文件，符号链接形式的工作区定义会被静默忽略（请用真实文件，或改为链接目录）。
 - **符号链接目录按文件补全。** 在根内，自动补全按目录标志分类条目，因此符号链接的子目录补全后不会带尾部 `/`。
-- **共享主根路径：先到先得。** 当两个工作区定义声明了相同的主根路径时，自动加载扫描按合并顺序激活第一个，没有歧义警告。
 
 ## MVP 之后的路线图
 
 本版本未包含、后续计划或希望加入的：
 
-- `/workspace set-primary` —— 重新指定当前工作区的主根。
 - `/workspace config` —— 在会话内编辑全局默认选项（`~/.pi/agent/pi-workspaces.json`）。
 - 交互式选择器 —— 创建向导和无参数 `load` 选择器。
 - 定义文件的 `fs.watch` 热重载（目前定义只在 `session_start` 读取一次；请用 `/workspace load` 重新读取）。
 - 跨根聚合搜索的便利功能（一次 grep 搜索所有根并合并结果）。
-- 内部 `samePath` 去重重构（路径归一化目前在解析器和激活检查中各有一份）。
 
 ## 开发
 

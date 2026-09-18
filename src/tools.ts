@@ -30,7 +30,7 @@ import { resolveWorkspacePath, type RootInfo, type WorkspaceInfo } from "./path-
 export interface ToolDeps {
   getActive(): WorkspaceInfo | null;
   sessionCwd(): string; // getter, NOT a captured value: resolve at call time
-  onFirstTouch(root: RootInfo): string | null;
+  onFirstTouch(root: RootInfo, touchedPath?: string): string | null;
 }
 
 // Appended to every overridden tool's built-in description so the model
@@ -140,7 +140,7 @@ function makeWorkspaceExecute(spec: FileToolSpec, deps: ToolDeps) {
       ctx,
     );
     if (resolved.root) {
-      const note = deps.onFirstTouch(resolved.root);
+      const note = deps.onFirstTouch(resolved.root, resolved.absolutePath);
       if (note !== null) {
         return { ...result, content: [{ type: "text", text: note }, ...result.content] };
       }
@@ -231,7 +231,7 @@ function makeBashExecute(deps: ToolDeps) {
     ) => Promise<any>;
     const result = await execute(toolCallId, bashParams, signal, onUpdate, usedResolver ? undefined : ctx);
     if (root) {
-      const note = deps.onFirstTouch(root);
+      const note = deps.onFirstTouch(root, target);
       if (note !== null) {
         return { ...result, content: [{ type: "text", text: note }, ...result.content] };
       }

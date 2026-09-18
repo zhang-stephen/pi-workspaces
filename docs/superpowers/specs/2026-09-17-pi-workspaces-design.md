@@ -53,13 +53,13 @@ Root name assignment (in priority order): explicit `name` in the definition file
 
 | Layer | Content | Location | Written by |
 |-------|---------|----------|------------|
-| Workspace definitions | roots, primary, per-workspace options | `~/.pi/agent/workspaces/<name>.json` **and** `<repo>/.pi/workspaces/<name>.json` | `/workspace create`, `/workspace add-root`, etc. |
+| Workspace definitions | roots, per-workspace options | `~/.pi/agent/workspaces/<name>.json` **and** `<project>/.pi/workspaces/<name>.json` (project dir discovered by marker ascent, §3.3) | `/workspace create`, `/workspace add-root`, etc. |
 | Global default config | default option values | `~/.pi/agent/pi-workspaces.json` | `/workspace config` (post-MVP); hand-editable |
 | Session state | name of the active workspace | `pi.appendEntry()` in the session file | automatic on load/unload |
 
 pi has no unified extension settings API; its `settings.json` schema is owned by pi core with no extension namespace. Following the official `preset.ts` example, the extension manages its own JSON files, locating the global directory via `getAgentDir()`.
 
-**Install scope gates access to these layers.** The extension detects its own file location: a global install under `<agentDir>/extensions/` may use all three layers; anything else - a project install under `<cwd>/.pi/extensions/` or an explicit `-e` dev path - is project-scoped and touches only `<cwd>/.pi/workspaces/` plus the session journal. The global definition directory and the global default config are neither read nor written in project scope. Rationale: a repo-shared extension must not peek at (or mutate) the user's personal workspaces.
+**Install scope gates access to these layers.** The extension detects its own file location: a global install under `<agentDir>/extensions/` may use all three layers; anything else - a project install under `<cwd>/.pi/extensions/` or an explicit `-e` dev path - is project-scoped and touches only the discovered project source plus the session journal. The global definition directory and the global default config are neither read nor written in project scope. Rationale: a repo-shared extension must not peek at (or mutate) the user's personal workspaces.
 
 ### 3.2 Workspace definition schema
 
@@ -71,38 +71,49 @@ pi has no unified extension settings API; its `settings.json` schema is owned by
     { "name": "backend",  "path": "C:/repos/backend" },
     { "name": "frontend", "path": "C:/repos/frontend" }
   ],
-  "primary": "backend",
   "options": {
-    "autoLoadInPrimary": true,
-    "promptInOtherDirs": true
+    "activation": "auto",
+    "warnOnUnrelatedLoad": true
   }
 }
 ```
 
 - `version`: schema version, currently `1`; unknown versions are skipped with a warning
-- `primary`: must reference a root in `roots`
+- `roots`: an **unordered set of equal roots** - there is no primary root (removed 2026-09-19, see §17)
 - `options`: per-workspace overrides of the global defaults
+  - `activation`: `"auto"` (load silently when the session cwd is inside any root) or `"prompt"` (ask first)
+  - `warnOnUnrelatedLoad`: warn when `/workspace load` activates a workspace whose roots do not contain the cwd
 
 Global default config (`~/.pi/agent/pi-workspaces.json`):
 
 ```json
 {
   "defaults": {
-    "autoLoadInPrimary": true,
-    "promptInOtherDirs": true
-  }
+    "activation": "auto",
+    "warnOnUnrelatedLoad": true
+  },
+  "projectRootAscend": 3
 }
 ```
 
 Option resolution chain (per option):
 
 ```
-workspace.options.<key> ?? globalDefaults.<key> ?? builtInDefault
+workspace.options.<key> ?? globalDefaults.defaults.<key> ?? builtInDefault
 ```
 
-Built-in defaults: `autoLoadInPrimary: true`, `promptInOtherDirs: true`.
+Built-in defaults: `activation: "auto"`, `warnOnUnrelatedLoad: true`, `projectRootAscend: 3`.
+`projectRootAscend` is a **global-only** knob (chicken-and-egg: it controls how definitions are
+found), so it never participates in the per-workspace chain and is ignored in project scope.
 
 ### 3.3 Dual-source loading (merge rule)
+
+The **project source** is discovered by marker ascent (2026-09-19, §17): walk up from the session
+cwd at most `projectRootAscend` levels and stop at the first directory containing any root marker
+(`.pi`, `.git`, `.agents`). The nearest marker directory wins even when it has no `.pi/workspaces`
+subdirectory - the project source is then simply empty (no error, no further ascent into outer
+projects). Discovery never ascends above the user's home directory; with no marker inside the cap,
+the project dir is the cwd itself.
 
 At `session_start` a global-scope install scans **both** sources and merges **by name, project source wins** — the official pi convention (core skills/agents/themes and the `preset.ts` example all override per name, never wholesale). Full override is explicitly rejected: a project definition must not hide the user's unrelated global workspaces. Project-scope installs scan only the project source, so no merging applies to them.
 
@@ -122,12 +133,13 @@ At `session_start` a global-scope install scans **both** sources and merges **by
 On `session_start`:
 
 1. Scan the visible sources (§3.3)
-2. If `ctx.cwd` equals a workspace's primary root path → auto-load it when `autoLoadInPrimary` resolves to true
-3. Else if `ctx.cwd` sits inside some workspace's *non-primary* root and that workspace's `promptInOtherDirs` resolves to true → `ctx.ui.select` offering exactly those containing workspaces plus "Don't load". A session started outside every workspace root is never prompted - loading from an unrelated directory is always an explicit `/workspace load`
-4. The active workspace name is persisted via `pi.appendEntry()` so `/resume` restores it
-5. `/workspace load <name>` manually activates a workspace at any time; `/workspace unload` deactivates
+2. Compute the **containing set**: definitions where `ctx.cwd` sits inside any root
+3. Exactly one containing workspace with `activation: "auto"` → auto-load it silently. Multiple containing workspaces always prompt (disambiguation), even when all say `"auto"`
+4. Otherwise, when the containing set is non-empty and `ctx.hasUI` → `ctx.ui.select` offering exactly the containing workspaces plus "Don't load" (covers `activation: "prompt"` and multi-match). A session started outside every workspace root is never prompted - loading from an unrelated directory is always an explicit `/workspace load`
+5. The active workspace name is persisted via `pi.appendEntry()` so `/resume` restores it; the write is skipped when the last journaled entry already records the same state (reload-safe, 16.5)
+6. `/workspace load <name>` manually activates a workspace at any time; `/workspace unload` deactivates. Loading a workspace whose roots do not contain the cwd warns (bare relative paths stay anchored at the session directory) but proceeds, gated by `warnOnUnrelatedLoad`
 
-**Project-level installation caveat**: if the extension is installed under `<primary-repo>/.pi/extensions/`, pi only discovers it when the session starts inside that repo, and the install is project-scoped (§3.1) - global definitions stay invisible. This is expected and documented in the README, not an error.
+**Project-level installation caveat**: if the extension is installed under `<repo>/.pi/extensions/`, pi only discovers it when the session starts inside that repo, and the install is project-scoped (§3.1) - global definitions stay invisible. This is expected and documented in the README, not an error.
 
 Only one workspace may be active at a time. Loading another replaces the current one (with a notify).
 
@@ -205,14 +217,14 @@ pi.registerTool({
 
 `before_agent_start` (and after every load/unload) appends a workspace section to the system prompt when a workspace is active:
 
-1. **Workspace map**: root name → absolute path, primary marked
+1. **Workspace map**: root name → absolute path, missing roots marked
 2. **Syntax rules**: `@root-name/path` prefix; bare relative paths = session start directory; absolute paths work everywhere
 3. **bash usage**: the `cwd` parameter
-4. **Constraint policy**: each root's own AGENTS.md/CLAUDE.md governs work inside it; roots without one fall back to the primary root's constraints
+4. **Constraint policy**: each root's own AGENTS.md/CLAUDE.md governs work inside it; roots without one fall back to the constraints of the **session root** (the root containing the session cwd); when the cwd is inside no root there is no fallback
 
 ### On-demand constraint injection
 
-The primary root's constraint files are loaded natively by pi (session start directory). For other roots: the **first time** a tool call touches a root during the session, that root's constraint files (if any) are appended to the tool result, preceded by a marker line. Roots without constraint files yield a one-line note ("no root-specific constraints; primary root constraints apply"). Injection happens once per root per session — tracked in memory, reset on load/unload.
+Constraint files of the root containing the session cwd are loaded natively by pi (session start directory). For other roots: the **first time** a tool call touches a root during the session, that root's constraint files (if any) are appended to the tool result, preceded by a marker line; a root without constraint files falls back to the session root's files, and otherwise yields a one-line "no root-specific constraints" note. Injection happens once per root per session — tracked in memory, reset on load/unload. When the touched file IS the constraint file about to be injected, the injection is skipped (16.4) - the tool result already delivered the content.
 
 This avoids front-loading every root's constraints into the system prompt.
 
@@ -223,16 +235,16 @@ This avoids front-loading every root's constraints into the system prompt.
 | Command | Behavior |
 |---------|----------|
 | `/workspace` | Show active workspace status (roots, health, origin) |
-| `/workspace list` | List all definitions from both sources, with `origin` and primary |
-| `/workspace load <name>` | Activate a workspace (arg or interactive select) |
+| `/workspace list` | List all definitions from both sources, with `origin` |
+| `/workspace load <name>` | Activate a workspace; warns when its roots do not contain the cwd (`warnOnUnrelatedLoad`) |
 | `/workspace unload` | Deactivate; statusline clears |
-| `/workspace create <name>` | Create a definition in the global source (interactive root entry) |
-| `/workspace add-root [name] <path>` | Add a root to the active workspace |
-| `/workspace remove-root <name>` | Remove a root from the active workspace |
+| `/workspace create <name>` | Create a definition with the cwd as its sole root (in the source matching the install scope) |
+| `/workspace add-root [name] <path>` | Add a root to the active workspace (alias: `add`) |
+| `/workspace remove-root <name>` | Remove a root; the last remaining root is protected (alias: `remove`) |
 
 All commands available in RPC mode; interactive pickers fall back to argument-based usage when `ctx.hasUI` is false.
 
-Post-MVP: `/workspace set-primary`, `/workspace config` (edit global defaults), create wizard, `/workspace reload`.
+Post-MVP: `/workspace config` (edit global defaults), create wizard, `/workspace reload`.
 
 ---
 
@@ -259,8 +271,8 @@ States:
 
 ```
 inactive:        (status cleared — no noise)
-active, healthy: ⬢ my-workspace (3 roots) · primary: backend
-active, degraded:⬢ my-workspace (2/3 roots) · primary: backend · ⚠ frontend missing
+active, healthy: [ws] my-workspace (3 roots)
+active, degraded:[ws] my-workspace (2/3 roots)  ! frontend missing
 ```
 
 Colors via `ctx.ui.theme`: `accent` for icon + name, `dim` for metadata, `warning` for degradation.
@@ -295,7 +307,7 @@ Refresh triggers: `session_start` auto-load, `load`/`unload`, `add-root`/`remove
 
 **In**: §3 storage (dual-source, merge rule), §4 activation, §5 resolution, §6 all seven tool overrides, §7 injection, §8 commands (table only), §9 autocomplete, §10 statusline, §11 error handling, §12 tests.
 
-**Out** (post-MVP): `/workspace set-primary`, `/workspace config`, create wizard, `/workspace reload`, fs.watch, cross-root search conveniences, project-level override of global defaults.
+**Out** (post-MVP): `/workspace config`, create wizard, `/workspace reload`, fs.watch, cross-root search conveniences, project-level override of global defaults.
 
 ---
 
@@ -344,16 +356,44 @@ Current state (§9): typing `@` with an active workspace shows **only** root nam
 
 ### 16.2 Command palette source attribution
 
-In the `/` command list, commands from other sources carry an origin tag (e.g. `[u:npm:pi-markdown-preview]`). The `workspace` command should similarly identify pi-workspaces as its source. Open question: whether pi's `registerCommand` supports a source field or the description must carry the tag.
+RESOLVED (2026-09-19): verified against pi's dist - for directory installs the palette tag only
+prefixes a scope letter ([u]/[p]/[t]); the extension name is rendered only for npm/git package
+sources ([u:npm:...]). The /workspace description therefore carries the attribution itself
+("pi-workspaces: manage ...").
 
 ### 16.3 Command alias: add / remove
 
-`add-root` / `remove-root` should be reachable as the shorter `add` / `remove` (alias or rename; keeping the long forms as aliases preserves muscle memory and docs).
+RESOLVED (2026-09-19): `add` / `remove` are first-class aliases of `add-root` / `remove-root`;
+the long forms keep working.
 
 ### 16.4 Known issue: constraint self-injection duplicates content
 
-Reproduced in session `01a0b551-0e4a-727a-b466-44c4a7dedf6f`: `read @yolo/AGENTS.md` returned the file's content twice — once as the first-touch constraint block (which *is* that file's content), once as the file body. The model flagged the duplication itself. Fix: when the resolved target file is the very constraint file about to be injected, skip the injection block.
+Reproduced in session `01a0b551-0e4a-727a-b466-44c4a7dedf6f`: `read @yolo/AGENTS.md` returned the file's content twice — once as the first-touch constraint block (which *is* that file's content), once as the file body. The model flagged the duplication itself. RESOLVED (2026-09-19): when the resolved target file is the very constraint file about to be injected, the injection is skipped.
 
 ### 16.5 Known issue: journal entries duplicate on repeated session_start
 
-Same session: five consecutive `pi-workspaces:active` entries with identical data, caused by `session_start` re-firing (extension reloads while testing) and each firing appending unconditionally. Fix: make `setActive` idempotent at the journal level — skip `appendEntry` when the last journaled name already equals the new one.
+Same session: five consecutive `pi-workspaces:active` entries with identical data, caused by `session_start` re-firing (extension reloads while testing) and each firing appending unconditionally. RESOLVED (2026-09-19): `setActive` skips `appendEntry` when the last journaled name already equals the new one.
+
+---
+
+## 17. Decision Record: No-Primary Refactor (2026-09-19)
+
+Full spec: `2026-09-19-no-primary-refactor-design.md` (same directory). Sections 3.2, 3.3, 4, 7,
+8 and 10 of this document are already synced; the decisions in brief:
+
+- **D3**: `primary` removed entirely - a workspace is an unordered set of equal roots.
+- **D4**: `activation: "auto" | "prompt"` replaces `autoLoadInPrimary`/`promptInOtherDirs`;
+  built-in default `"auto"`. Multiple containing workspaces always prompt.
+- **D5**: project source discovered by marker ascent (`.pi`/`.git`/`.agents`, nearest wins, capped
+  by global-only `projectRootAscend` = 3, never above home); a marker dir without `.pi/workspaces`
+  means an empty project source, not further ascent.
+- **D6**: constraint fallback chain = touched root -> session root (root containing the cwd) ->
+  none; unrelated loads have no fallback.
+- **D7**: `/workspace load` of a non-containing workspace warns (`warnOnUnrelatedLoad`, default
+  true) but proceeds.
+- **D8**: `remove-root` protects the last remaining root (replaces primary protection).
+- **D9** (simplified during implementation): no dedicated legacy-key detection. The `primary`
+  field is simply not part of the schema anymore; legacy option keys fail the generic
+  unknown-option validation; existing definition files are migrated by hand.
+- **D10**: same batch fixed 16.2 (source attribution verified), 16.3 (add/remove aliases), 16.4
+  (constraint self-injection skip), 16.5 (journal dedupe). 16.1 (autocomplete vision) is deferred.

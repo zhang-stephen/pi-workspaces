@@ -1,11 +1,13 @@
 // Wiring tests for index.ts, the extension entry: the factory registers
 // the seven tool overrides and the /workspace command plus both event
-// handlers; session_start auto-loads the workspace whose primary root is
-// the session cwd (and notifies warnings/collisions); setActive is the
-// single journal point (pi-workspaces:active entries); before_agent_start
-// appends the workspace section only while a workspace is active; the
-// @root autocomplete provider registers only on UI sessions. Fixtures live
-// in temp dirs; the global source is isolated via PI_CODING_AGENT_DIR.
+// handlers; session_start activates by containment (auto-load for a single
+// containing workspace with activation "auto", a select prompt otherwise,
+// never outside every root) and notifies warnings/collisions; setActive is
+// the single journal point (pi-workspaces:active entries, deduped per
+// 16.5); before_agent_start appends the workspace section only while a
+// workspace is active; the @root autocomplete provider registers only on
+// UI sessions. Fixtures live in temp dirs; the global source is isolated
+// via PI_CODING_AGENT_DIR.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -34,6 +36,11 @@ function isolatedFixture(): { agentDir: string; cwd: string; restore: () => void
   };
 }
 
+/** Pin the project source to the cwd itself without any definitions. */
+function markProjectRoot(cwd: string): void {
+  fs.mkdirSync(path.join(cwd, ".git"), { recursive: true });
+}
+
 /** mockCtx with ui.setStatus/ui.notify captured into arrays. */
 function ctxCapturingUi(cwd: string): {
   ctx: ReturnType<typeof mockCtx>;
@@ -57,6 +64,7 @@ const TOOL_NAMES = ["read", "write", "edit", "grep", "find", "ls", "bash"];
 test("factory registers the 7 tool overrides, the /workspace command and both event handlers", async () => {
   const fx = isolatedFixture();
   try {
+    markProjectRoot(fx.cwd);
     const pi = mockPi();
     factory(pi, "global");
 
@@ -89,16 +97,16 @@ test("factory registers the 7 tool overrides, the /workspace command and both ev
   }
 });
 
-test("session_start auto-loads the workspace whose primary root is the session cwd and journals it", async () => {
+test("session_start auto-loads the single containing workspace and journals it", async () => {
   const fx = isolatedFixture();
   try {
-    // "demo"'s primary root IS the session cwd -> auto-load (builtin
-    // autoLoadInPrimary default). "other" must stay inactive.
+    // "demo" contains the session cwd (root = cwd) and resolves activation
+    // "auto" (builtin default) -> auto-load. "other" contains nothing near
+    // the cwd and must stay inactive.
     const def = {
       name: "demo",
       version: 1,
       roots: [{ name: "app", path: fx.cwd }],
-      primary: "app",
     };
     writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify(def));
     const otherDir = path.join(fx.agentDir, "other-root");
@@ -107,7 +115,6 @@ test("session_start auto-loads the workspace whose primary root is the session c
       name: "other",
       version: 1,
       roots: [{ name: "o", path: otherDir }],
-      primary: "o",
     };
     writeFile(fx.agentDir, path.join("workspaces", "other.json"), JSON.stringify(otherDef));
     // A corrupt file warns; a project definition colliding on "other" warns too.
@@ -126,7 +133,7 @@ test("session_start auto-loads the workspace whose primary root is the session c
     // Statusline renders the active workspace under the fixed key.
     assert.ok(
       statuses.some(
-        ([key, text]) => key === "pi-workspaces" && typeof text === "string" && text.includes("demo") && text.includes("primary: app"),
+        ([key, text]) => key === "pi-workspaces" && typeof text === "string" && text.includes("demo") && text.includes("(1 roots)"),
       ),
     );
     // The auto-load is announced.
@@ -139,6 +146,69 @@ test("session_start auto-loads the workspace whose primary root is the session c
   }
 });
 
+test("session_start auto-loads from any containing root, not just the first", async () => {
+  const fx = isolatedFixture();
+  try {
+    // The cwd sits two levels beneath the SECOND root of "demo" - no
+    // primary concept gates the auto-load anymore.
+    const rootA = makeTempDir("pi-workspaces-roota-");
+    const rootB = makeTempDir("pi-workspaces-rootb-");
+    const cwd = path.join(rootB, "src", "deep");
+    fs.mkdirSync(cwd, { recursive: true });
+    markProjectRoot(cwd);
+    const def = {
+      name: "demo",
+      version: 1,
+      roots: [
+        { name: "a", path: rootA },
+        { name: "b", path: rootB },
+      ],
+    };
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify(def));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx, notes } = ctxCapturingUi(cwd);
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "demo" }]);
+    assert.ok(notes.some(([msg]) => /auto-loaded/i.test(msg)));
+    cleanup(rootA, rootB);
+  } finally {
+    fx.restore();
+  }
+});
+
+// 16.5: re-activation of the already-journaled workspace (e.g. after a
+// reload) must not duplicate the pi-workspaces:active journal entry.
+test("setActive skips the journal write when the last entry already names the workspace", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    const def = {
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: fx.cwd }],
+    };
+    writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify(def));
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const { ctx } = ctxCapturingUi(fx.cwd);
+    // The session journal already records "demo" as active (resume after
+    // a reload): the auto-load re-activation must not append a duplicate.
+    ctx.sessionManager.getEntries = () => [
+      { type: "custom", customType: "pi-workspaces:active", data: { name: "demo" } },
+    ] as unknown as ReturnType<typeof ctx.sessionManager.getEntries>;
+
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.equal(pi.entries.get("pi-workspaces:active"), undefined, "no duplicate journal entry");
+  } finally {
+    fx.restore();
+  }
+});
+
 test("before_agent_start appends the workspace section only when a workspace is active", async () => {
   const fx = isolatedFixture();
   try {
@@ -146,7 +216,6 @@ test("before_agent_start appends the workspace section only when a workspace is 
       name: "demo",
       version: 1,
       roots: [{ name: "app", path: fx.cwd }],
-      primary: "app",
     };
     writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify(def));
 
@@ -167,7 +236,7 @@ test("before_agent_start appends the workspace section only when a workspace is 
     assert.equal(results.length, 1);
     assert.equal(results[0], undefined);
 
-    // session_start auto-loads "demo" (the cwd is its primary root).
+    // session_start auto-loads "demo" (the cwd sits inside its root).
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
 
     results = await emit(pi.handlers, "before_agent_start", beforeEvent, ctx);
@@ -191,41 +260,28 @@ test("before_agent_start appends the workspace section only when a workspace is 
   }
 });
 
-test("session_start select offers only the containing workspace when the cwd is inside a non-primary root", async () => {
+test("session_start prompts for a single containing workspace with activation 'prompt'", async () => {
   const fx = isolatedFixture();
-  const primaryDir = makeTempDir("pi-workspaces-primary-");
-  const libDir = makeTempDir("pi-workspaces-lib-");
-  const otherDir = makeTempDir("pi-workspaces-other-");
   try {
-    // "holder" declares "lib" as a non-primary root; the session cwd sits
-    // inside it. "other" contains nothing near the cwd.
+    markProjectRoot(fx.cwd);
     const holderDef = {
       name: "holder",
       version: 1,
-      roots: [
-        { name: "app", path: primaryDir },
-        { name: "lib", path: libDir },
-      ],
-      primary: "app",
+      roots: [{ name: "app", path: fx.cwd }],
+      options: { activation: "prompt" },
     };
     const otherDef = {
       name: "other",
       version: 1,
-      roots: [{ name: "o", path: otherDir }],
-      primary: "o",
+      roots: [{ name: "o", path: path.join(fx.agentDir, "other-root") }],
     };
     writeFile(fx.agentDir, path.join("workspaces", "holder.json"), JSON.stringify(holderDef));
     writeFile(fx.agentDir, path.join("workspaces", "other.json"), JSON.stringify(otherDef));
 
-    // The cwd is no workspace's primary root, so no auto-load pre-empts the
-    // prompt; it sits beneath "holder"'s non-primary "lib" root.
-    const cwd = path.join(libDir, "deep");
-    fs.mkdirSync(cwd);
-
     const pi = mockPi();
     factory(pi, "global");
     const selects: Array<{ message: string; items: string[] }> = [];
-    const ctx = mockCtx(cwd, { hasUI: true });
+    const ctx = mockCtx(fx.cwd, { hasUI: true });
     ctx.ui.select = async (message: string, items: string[]) => {
       selects.push({ message, items });
       return undefined;
@@ -233,15 +289,48 @@ test("session_start select offers only the containing workspace when the cwd is 
 
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
 
-    // Two-layer semantics: only the containing workspace is offered, with
-    // the escape hatch appended.
+    // Only the containing workspace is offered, with the escape hatch.
     assert.deepEqual(selects, [
       { message: "Load a workspace for this session?", items: ["holder", "Don't load"] },
     ]);
     // Declining the prompt activates nothing.
     assert.equal(pi.entries.get("pi-workspaces:active"), undefined);
   } finally {
-    cleanup(primaryDir, libDir, otherDir);
+    fx.restore();
+  }
+});
+
+test("session_start prompts over ALL containing workspaces on a multi-match, even all-auto", async () => {
+  const fx = isolatedFixture();
+  try {
+    markProjectRoot(fx.cwd);
+    // Both workspaces contain the cwd and both resolve activation "auto";
+    // disambiguation always prompts.
+    for (const name of ["alpha", "beta"]) {
+      writeFile(
+        fx.agentDir,
+        path.join("workspaces", `${name}.json`),
+        JSON.stringify({ name, version: 1, roots: [{ name: "r", path: fx.cwd }] }),
+      );
+    }
+
+    const pi = mockPi();
+    factory(pi, "global");
+    const selects: Array<{ message: string; items: string[] }> = [];
+    const ctx = mockCtx(fx.cwd, { hasUI: true });
+    ctx.ui.select = async (message: string, items: string[]) => {
+      selects.push({ message, items });
+      return "beta";
+    };
+
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    assert.deepEqual(selects, [
+      { message: "Load a workspace for this session?", items: ["alpha", "beta", "Don't load"] },
+    ]);
+    // Choosing from the prompt activates the choice and journals it.
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "beta" }]);
+  } finally {
     fx.restore();
   }
 });
@@ -251,17 +340,16 @@ test("session_start never prompts when the cwd is outside every workspace root",
   const alphaDir = makeTempDir("pi-workspaces-alpha-");
   const betaDir = makeTempDir("pi-workspaces-beta-");
   try {
+    markProjectRoot(fx.cwd);
     const alphaDef = {
       name: "alpha",
       version: 1,
       roots: [{ name: "a", path: alphaDir }],
-      primary: "a",
     };
     const betaDef = {
       name: "beta",
       version: 1,
       roots: [{ name: "b", path: betaDir }],
-      primary: "b",
     };
     writeFile(fx.agentDir, path.join("workspaces", "alpha.json"), JSON.stringify(alphaDef));
     writeFile(fx.agentDir, path.join("workspaces", "beta.json"), JSON.stringify(betaDef));
@@ -277,9 +365,9 @@ test("session_start never prompts when the cwd is outside every workspace root",
 
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
 
-    // Definitions exist and both resolve promptInOtherDirs: true, yet no
-    // workspace contains the cwd - the prompt must not fire. Loading from
-    // an unrelated directory is always an explicit /workspace load.
+    // Definitions exist, yet no workspace contains the cwd - the prompt
+    // must not fire (D2). Loading from an unrelated directory is always an
+    // explicit /workspace load.
     assert.deepEqual(selects, []);
     assert.equal(pi.entries.get("pi-workspaces:active"), undefined);
   } finally {
@@ -290,26 +378,24 @@ test("session_start never prompts when the cwd is outside every workspace root",
 
 test("project scope sees only the project source and ignores the global defaults config", async () => {
   const fx = isolatedFixture();
-  const primaryDir = makeTempDir("pi-workspaces-primary-");
+  const rootDir = makeTempDir("pi-workspaces-root-");
   try {
     // A global definition that must stay invisible in project scope, and a
     // global defaults config that must not be read either.
     const ghostDef = {
       name: "ghost",
       version: 1,
-      roots: [{ name: "g", path: primaryDir }],
-      primary: "g",
+      roots: [{ name: "g", path: rootDir }],
     };
     writeFile(fx.agentDir, path.join("workspaces", "ghost.json"), JSON.stringify(ghostDef));
-    writeFile(fx.agentDir, "pi-workspaces.json", JSON.stringify({ defaults: { autoLoadInPrimary: false } }));
-    // The project definition lives under <cwd>/.pi/workspaces; its cwd is
-    // the primary root, so auto-load fires - unless the (unreadable)
-    // global defaults config were consulted, which disables auto-load.
+    writeFile(fx.agentDir, "pi-workspaces.json", JSON.stringify({ defaults: { activation: "prompt" } }));
+    // The project definition lives under <cwd>/.pi/workspaces and contains
+    // the cwd, so auto-load fires - unless the (unreadable) global defaults
+    // config were consulted, which would switch activation to "prompt".
     const projDef = {
       name: "proj",
       version: 1,
       roots: [{ name: "app", path: fx.cwd }],
-      primary: "app",
     };
     writeFile(fx.cwd, path.join(".pi", "workspaces", "proj.json"), JSON.stringify(projDef));
 
@@ -331,7 +417,7 @@ test("project scope sees only the project source and ignores the global defaults
       "the global definition must not leak into project scope",
     );
   } finally {
-    cleanup(primaryDir);
+    cleanup(rootDir);
     fx.restore();
   }
 });

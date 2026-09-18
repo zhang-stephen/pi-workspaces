@@ -17,14 +17,14 @@ After the install-scope + prompt-tightening change (commit 41417a9), a brainstor
 - **D6**: constraint fallback chain = touched root's own AGENTS.md/CLAUDE.md -> session root (the root containing the cwd) -> none. Unrelated loads have no session root, hence no fallback (the cwd's own constraints already reach the model via pi's native project instructions; injecting them into tool results would be noise and semantically wrong).
 - **D7**: `/workspace load` of a workspace whose roots do not contain the cwd warns ("bare relative paths stay anchored at the session directory") but proceeds. Gated by `warnOnUnrelatedLoad` (built-in default true).
 - **D8**: `remove-root` protects the last remaining root (replaces primary protection).
-- **D9**: breaking change, no tolerance. Definitions still containing the removed `primary` field or the removed option keys (`autoLoadInPrimary`, `promptInOtherDirs`) are **rejected** with an explanatory error naming the offending key. No silent ignoring, no migration. The user's own definition files (e.g. `~/.pi/agent/workspaces/*.json`) must be migrated by hand when this lands.
+- **D9** (simplified during implementation): breaking change, but no dedicated legacy-key detection. The `primary` field is simply not part of the schema anymore (silently absent from the normalized copy); the removed option keys (`autoLoadInPrimary`, `promptInOtherDirs`) fail the generic unknown-option validation, which names the key. Existing definition files are migrated by hand.
 - **D10**: same batch also fixes recorded items 16.2 (command source attribution), 16.3 (`add`/`remove` aliases), 16.4 (constraint self-injection duplicates content), 16.5 (journal entries duplicate on repeated session_start). Item 16.1 (autocomplete vision) is deferred to the next batch.
 
 ## Design deltas per module
 
 ### workspace-store.ts
 
-- `WorkspaceDefinition`: drop `primary`. `WorkspaceOptions` = `{ activation?: "auto" | "prompt"; warnOnUnrelatedLoad?: boolean }`. Validation: `activation` must be one of the two strings when present; `warnOnUnrelatedLoad` boolean; a definition still carrying `primary` or the legacy option keys is rejected with an error naming the key (D9).
+- `WorkspaceDefinition`: drop `primary`. `WorkspaceOptions` = `{ activation?: "auto" | "prompt"; warnOnUnrelatedLoad?: boolean }`. Validation: `activation` must be one of the two strings when present; `warnOnUnrelatedLoad` boolean; unknown option keys (including the removed legacy ones) are rejected with an error naming the key (D9, simplified).
 - `BUILTIN_DEFAULTS` = `{ activation: "auto", warnOnUnrelatedLoad: true }`.
 - New `discoverProjectDir(cwd, ascend)`: walk up from cwd at most `ascend` levels, stop at the first directory containing any root marker (`.pi`, `.git`, `.agents`); never cross above the user's home directory. The nearest marker directory wins even when it has no `.pi/workspaces` subdirectory (or it is empty) - that simply means the project source is empty and contributes no auto-load/prompt candidates (no error, no further ascent into outer projects). When no ancestor within the cap has a marker, the project dir is the cwd itself.
 - Project source = `discoverProjectDir(cwd)/.pi/workspaces`.

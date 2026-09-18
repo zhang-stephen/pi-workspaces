@@ -6,7 +6,7 @@
 import * as path from "node:path";
 
 export interface RootInfo { name: string; path: string; exists: boolean }
-export interface WorkspaceInfo { name: string; roots: RootInfo[]; primary: string; origin: "global" | "project" }
+export interface WorkspaceInfo { name: string; roots: RootInfo[]; origin: "global" | "project" }
 export type ResolveResult =
   | { ok: true; absolutePath: string; root: RootInfo | null }
   | { ok: false; error: string }
@@ -15,8 +15,10 @@ export type ResolveResult =
  * Comparison key used for containment: separators normalized to "/", a
  * leading win32 drive letter lowercased, and a redundant trailing slash
  * dropped. Everything else is compared verbatim (lexical, case-sensitive).
+ * Exported for the store (home-guard comparison) and the entry point
+ * (auto-load equality check).
  */
-function comparisonKey(p: string): string {
+export function pathKey(p: string): string {
   let key = p.replace(/\\/g, "/");
   if (/^[A-Za-z]:\//.test(key)) key = key[0].toLowerCase() + key.slice(1);
   if (key.length > 1 && key.endsWith("/")) key = key.slice(0, -1);
@@ -25,8 +27,8 @@ function comparisonKey(p: string): string {
 
 /** Lexical containment: true when `child` equals `parent` or sits beneath it. */
 export function isInside(parent: string, child: string): boolean {
-  const p = comparisonKey(parent);
-  const c = comparisonKey(child);
+  const p = pathKey(parent);
+  const c = pathKey(child);
   if (c === p) return true;
   const prefix = p.endsWith("/") ? p : p + "/";
   return c.startsWith(prefix);
@@ -38,7 +40,7 @@ export function owningRoot(ws: WorkspaceInfo, absolutePath: string): RootInfo | 
   let bestLen = -1;
   for (const r of ws.roots) {
     if (!isInside(r.path, absolutePath)) continue;
-    const len = comparisonKey(r.path).length;
+    const len = pathKey(r.path).length;
     if (len > bestLen) {
       best = r;
       bestLen = len;

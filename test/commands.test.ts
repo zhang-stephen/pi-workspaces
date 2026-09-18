@@ -1,8 +1,9 @@
 // Unit tests for src/commands.ts: the /workspace command (status, list,
-// load, unload, create, add-root, remove-root) and the pure format helpers.
-// Fixtures live in temp dirs; the global definition source is isolated by
-// pointing PI_CODING_AGENT_DIR at an empty temp dir (getAgentDir reads that
-// env var at call time) and the project source is <cwd>/.pi/workspaces.
+// load, unload, create, add-root/add, remove-root/remove) and the pure
+// format helpers. Fixtures live in temp dirs; the global definition source
+// is isolated by pointing PI_CODING_AGENT_DIR at an empty temp dir
+// (getAgentDir reads that env var at call time) and the project source is
+// discovered by marker ascent from the cwd (fixtures create the marker).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -39,7 +40,7 @@ function workspaceCmd(pi: ReturnType<typeof mockPi>): (args: string, ctx: unknow
   return cmd.handler as (args: string, ctx: unknown) => Promise<void>;
 }
 
-test("formatStatus shows name, origin, primary and MISSING roots", () => {
+test("formatStatus shows name, origin and MISSING roots (no primary)", () => {
   const dir = makeTempDir();
   try {
     const real = path.join(dir, "app");
@@ -52,14 +53,13 @@ test("formatStatus shows name, origin, primary and MISSING roots", () => {
         { name: "app", path: real },
         { name: "docs", path: missing },
       ],
-      primary: "app",
     };
 
     const text = formatStatus(toWorkspaceInfo(def, "project"));
 
     assert.ok(text.includes("demo"));
     assert.ok(text.includes("origin: project"));
-    assert.ok(text.includes("primary: app"));
+    assert.ok(!text.includes("primary"), "no primary mention");
     // Existing root listed, not flagged; missing root flagged MISSING.
     assert.ok(text.includes(fs.realpathSync(real)));
     assert.ok(text.includes(missing));
@@ -73,7 +73,7 @@ test("formatStatus shows name, origin, primary and MISSING roots", () => {
   }
 });
 
-test("formatList shows every workspace with origin, primary and MISSING roots", () => {
+test("formatList shows every workspace with origin and MISSING roots (no primary)", () => {
   const dir = makeTempDir();
   try {
     const real = path.join(dir, "site");
@@ -86,13 +86,11 @@ test("formatList shows every workspace with origin, primary and MISSING roots", 
         { name: "app", path: real },
         { name: "docs", path: missing },
       ],
-      primary: "app",
     };
     const globalDef: WorkspaceDefinition = {
       name: "web",
       version: 1,
       roots: [{ name: "site", path: real }],
-      primary: "site",
     };
 
     const text = formatList([
@@ -100,15 +98,14 @@ test("formatList shows every workspace with origin, primary and MISSING roots", 
       { def: globalDef, origin: "global" },
     ]);
 
-    // Project entry: origin, primary and the MISSING marker.
+    // Project entry: origin and the MISSING marker.
     assert.ok(text.includes("demo"));
     assert.ok(text.includes("origin: project"));
-    assert.ok(text.includes("primary: app"));
     assert.ok(text.includes("MISSING"));
-    // Global entry: origin and primary, no MISSING marker on its line.
+    // Global entry: origin, no MISSING marker on its line.
     assert.ok(text.includes("web"));
     assert.ok(text.includes("origin: global"));
-    assert.ok(text.includes("primary: site"));
+    assert.ok(!text.includes("primary"), "no primary mention");
     const webBlock = text.slice(text.indexOf("web"));
     assert.ok(!webBlock.includes("MISSING"));
     // Input order is preserved.
@@ -127,7 +124,7 @@ test("unload clears the active workspace via setActive(null, ctx)", async () => 
   process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
     let activeNow: WorkspaceInfo | null = toWorkspaceInfo(
-      { name: "demo", version: 1, roots: [{ name: "app", path: cwd }], primary: "app" },
+      { name: "demo", version: 1, roots: [{ name: "app", path: cwd }] },
       "project",
     );
     let setCalls = 0;
@@ -174,6 +171,163 @@ test("unload clears the active workspace via setActive(null, ctx)", async () => 
   }
 });
 
+test("create persists a primary-free definition with the cwd as its sole root", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    let active: WorkspaceInfo | null = null;
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => active,
+      setActive: (ws) => {
+        active = ws;
+      },
+      scope: "project",
+    });
+    const { ctx, notes } = ctxCapturingNotify(cwd);
+    const handler = workspaceCmd(pi);
+
+    await handler("create demo", ctx);
+
+    // Active immediately, one root named after the cwd basename.
+    // (cast: TS flow-narrows the closure-assigned `active` to null)
+    const created = active as WorkspaceInfo | null;
+    assert.ok(created);
+    assert.equal(created.name, "demo");
+    assert.equal(created.roots.length, 1);
+    assert.equal(created.roots[0].name, path.basename(cwd));
+    assert.equal(created.roots[0].path, fs.realpathSync(cwd));
+    assert.ok(!("primary" in created), "runtime shape carries no primary");
+
+    // Persisted to the discovered project source, without a primary key.
+    const file = path.join(cwd, ".pi", "workspaces", "demo.json");
+    const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(persisted.name, "demo");
+    assert.deepEqual(persisted.roots, [{ name: path.basename(cwd), path: cwd }]);
+    assert.ok(!("primary" in persisted), "persisted definition carries no primary");
+    assert.ok(notes.every(([, level]) => level !== "error"));
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
+// D7: an unrelated load (cwd inside none of the roots) warns but proceeds,
+// gated by warnOnUnrelatedLoad.
+test("load of an unrelated workspace warns (default) and activates anyway", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const elsewhere = makeTempDir("pi-workspaces-elsewhere-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: elsewhere }],
+    }));
+
+    let active: WorkspaceInfo | null = null;
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => active,
+      setActive: (ws) => {
+        active = ws;
+      },
+      scope: "project",
+    });
+    const { ctx, notes } = ctxCapturingNotify(cwd);
+    const handler = workspaceCmd(pi);
+
+    await handler("load demo", ctx);
+
+    assert.equal((active as WorkspaceInfo | null)?.name, "demo", "the load proceeds despite the warning");
+    const warning = notes.find(([msg, level]) => level === "warning");
+    assert.ok(warning, "an unrelated load warns");
+    assert.match(warning[0], /not inside any root of 'demo'/);
+    assert.ok(warning[0].includes(cwd), "the warning names the session directory anchor");
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd, elsewhere);
+  }
+});
+
+test("load of an unrelated workspace stays silent with warnOnUnrelatedLoad: false", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const elsewhere = makeTempDir("pi-workspaces-elsewhere-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: elsewhere }],
+      options: { warnOnUnrelatedLoad: false },
+    }));
+
+    let active: WorkspaceInfo | null = null;
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => active,
+      setActive: (ws) => {
+        active = ws;
+      },
+      scope: "project",
+    });
+    const { ctx, notes } = ctxCapturingNotify(cwd);
+    const handler = workspaceCmd(pi);
+
+    await handler("load demo", ctx);
+
+    assert.equal((active as WorkspaceInfo | null)?.name, "demo");
+    assert.ok(notes.every(([, level]) => level !== "warning"), "the option silences the warning");
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd, elsewhere);
+  }
+});
+
+test("load of a workspace containing the cwd does not warn", async () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
+      name: "demo",
+      version: 1,
+      roots: [{ name: "app", path: cwd }],
+    }));
+
+    let active: WorkspaceInfo | null = null;
+    const pi = mockPi();
+    registerWorkspaceCommands(pi, {
+      getActive: () => active,
+      setActive: (ws) => {
+        active = ws;
+      },
+      scope: "project",
+    });
+    const { ctx, notes } = ctxCapturingNotify(cwd);
+    const handler = workspaceCmd(pi);
+
+    await handler("load demo", ctx);
+
+    assert.equal((active as WorkspaceInfo | null)?.name, "demo");
+    assert.ok(notes.every(([, level]) => level !== "warning"), "a containing load never warns");
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
 test("add-root mutates the active workspace and persists the project JSON file", async () => {
   const agentDir = makeTempDir("pi-workspaces-agent-");
   const cwd = makeTempDir("pi-workspaces-cwd-");
@@ -189,7 +343,6 @@ test("add-root mutates the active workspace and persists the project JSON file",
       name: "demo",
       version: 1,
       roots: [{ name: "app", path: appDir }],
-      primary: "app",
     };
     writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify(def));
 
@@ -217,14 +370,12 @@ test("add-root mutates the active workspace and persists the project JSON file",
       ["app", "docs"],
     );
     assert.equal(active.roots.find((r) => r.name === "docs")?.path, docsDir);
-    assert.equal(active.primary, "app");
     // The mutation is persisted to the project source, atomically via saveDefinition.
     const persisted = JSON.parse(fs.readFileSync(file, "utf8"));
     assert.deepEqual(persisted.roots, [
       { name: "app", path: appDir },
       { name: "docs", path: docsDir },
     ]);
-    assert.equal(persisted.primary, "app");
     assert.deepEqual(fs.readdirSync(path.dirname(file)).filter((n) => n.endsWith(".tmp")), []);
 
     // remove-root round-trips through the same reload-mutate-persist flow.
@@ -248,9 +399,9 @@ test("add-root mutates the active workspace and persists the project JSON file",
     );
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).roots, [{ name: "app", path: appDir }]);
 
-    // Removing the primary root is refused and nothing is persisted.
+    // Removing the last remaining root is refused (D8) and nothing persists.
     await handler("remove-root app", ctx);
-    assert.ok(notes.some(([msg, level]) => /primary/i.test(msg) && level === "error"));
+    assert.ok(notes.some(([msg, level]) => /last root/i.test(msg) && level === "error"));
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).roots, [{ name: "app", path: appDir }]);
     assert.equal(setCalls, 4); // two add + two remove; the refused one did not activate
   } finally {

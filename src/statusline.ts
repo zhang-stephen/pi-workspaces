@@ -3,7 +3,7 @@
 // "pi-workspaces" (keyed, stackable, persistent, theme-aware). renderStatus
 // is pure: colors are injected as fg(color, text) so tests and non-UI
 // contexts pass a plain passthrough. Healthy workspaces show
-// "[ws] <name> (N roots) primary: <p>"; degraded ones show "(ok/N roots)"
+// "[ws] <name> (N roots)"; degraded ones show "(ok/N roots)"
 // plus one warning-colored " ! <name> missing" marker per missing root.
 // ASCII only - no emoji or symbols. Task 12 wires refreshStatus into
 // session_start / load / unload; this module only reads ctx.ui.
@@ -14,14 +14,14 @@ const STATUS_KEY = "pi-workspaces";
 
 /**
  * Render the one-line footer status for a workspace. `fg` injects theme
- * colors: accent for the icon and workspace name, dim for the counts and
- * primary root, warning for each missing-root marker.
+ * colors: accent for the icon and workspace name, dim for the counts,
+ * warning for each missing-root marker.
  */
 export function renderStatus(ws: WorkspaceInfo, fg: (color: string, text: string) => string): string {
   const ok = ws.roots.filter((r) => r.exists).length;
   const healthy = ok === ws.roots.length;
   const counts = healthy ? `(${ws.roots.length} roots)` : `(${ok}/${ws.roots.length} roots)`;
-  let text = `${fg("accent", "[ws]")} ${fg("accent", ws.name)} ${fg("dim", counts)} ${fg("dim", `primary: ${ws.primary}`)}`;
+  let text = `${fg("accent", "[ws]")} ${fg("accent", ws.name)} ${fg("dim", counts)}`;
   if (!healthy) {
     for (const root of ws.roots) {
       if (!root.exists) text += fg("warning", ` ! ${root.name} missing`);

@@ -46,7 +46,7 @@ function makeFixture(): Fixture {
     sessionDir,
     rootA,
     rootB,
-    ws: { name: "demo", roots: [rootA, rootB], primary: "a", origin: "project" },
+    ws: { name: "demo", roots: [rootA, rootB], origin: "project" },
   };
 }
 

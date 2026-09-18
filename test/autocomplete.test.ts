@@ -28,7 +28,6 @@ test("completeRootNames filters roots by prefix and labels them @name", () => {
   const ws: WorkspaceInfo = {
     name: "demo",
     origin: "project",
-    primary: "alpha",
     roots: [
       { name: "alpha", path: "/ws/alpha", exists: true },
       { name: "alpine", path: "/ws/alpine", exists: true },
@@ -126,7 +125,6 @@ function makeWorkspace(): WorkspaceInfo {
   return {
     name: "demo",
     origin: "project",
-    primary: "alpha",
     roots: [{ name: "alpha", path: "/ws/alpha", exists: true }],
   };
 }

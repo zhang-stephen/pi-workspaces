@@ -18,8 +18,8 @@ function root(name: string, rel: string, exists = true): RootInfo {
   return { name, path: path.join(BASE, rel), exists };
 }
 
-function workspace(roots: RootInfo[], primary = roots[0].name): WorkspaceInfo {
-  return { name: "demo", roots, primary, origin: "project" };
+function workspace(roots: RootInfo[]): WorkspaceInfo {
+  return { name: "demo", roots, origin: "project" };
 }
 
 const ALPHA = root("alpha", "alpha");

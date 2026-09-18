@@ -5,11 +5,13 @@
 // per design section 4:
 //   session_start -> loadAll (sources depend on the install scope:
 //   global installs see global+project, anything else sees the project
-//   source only) -> notify warnings/collisions -> auto-load when the
-//   session cwd equals a workspace's primary root and autoLoadInPrimary
-//   resolves true -> journal restore (session resume) -> select prompt
-//   when ctx.hasUI and the cwd sits in some workspace's non-primary root.
-//   A cwd outside every root never prompts.
+//   source only; the project source is discovered by marker ascent, D5)
+//   -> notify warnings/collisions -> auto-load when exactly one workspace
+//   contains the session cwd and its activation resolves "auto" ->
+//   journal restore (session resume) -> select prompt when ctx.hasUI and
+//   at least one workspace contains the cwd (covers activation "prompt"
+//   and multi-match disambiguation). A cwd outside every root never
+//   prompts (D2).
 // setActive is the single activation point: it owns the first-touch
 // tracker reset, the statusline refresh and the pi-workspaces:active
 // journal entry - nothing else writes the journal.
@@ -33,24 +35,6 @@ import {
 
 /** Journal entry type: the active workspace name, recorded on every switch. */
 const JOURNAL_TYPE = "pi-workspaces:active";
-
-/**
- * Lexical path equality for the auto-load comparison: separators
- * normalized to "/", a leading win32 drive letter lowercased, and a
- * redundant trailing slash dropped (the same normalization rule as the
- * resolver's containment comparison). Root paths arrive canonicalized
- * from the store; the session cwd is normalized the same lexical way.
- */
-function pathKey(p: string): string {
-  let key = p.replace(/\\/g, "/");
-  if (/^[A-Za-z]:\//.test(key)) key = key[0].toLowerCase() + key.slice(1);
-  if (key.length > 1 && key.endsWith("/")) key = key.slice(0, -1);
-  return key;
-}
-
-function samePath(a: string, b: string): boolean {
-  return pathKey(a) === pathKey(b);
-}
 
 /**
  * Decide which definition sources this install may see from the extension
@@ -104,7 +88,7 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
   let active: WorkspaceInfo | null = null;
   let sessionCwd = "";
 
-  const tracker = new FirstTouchTracker(makeConstraintReader(() => active?.primary ?? ""));
+  const tracker = new FirstTouchTracker(makeConstraintReader(() => active, () => sessionCwd));
   const getActive = (): WorkspaceInfo | null => active;
   const getSessionCwd = (): string => sessionCwd;
 
@@ -113,19 +97,24 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
    * switch: reset the once-per-root constraint tracker, refresh the footer
    * status (when a session ctx is available) and journal the new state so
    * /resume can restore it (design section 4, step 4). Unload journals
-   * { name: null }.
+   * { name: null }. 16.5: the journal write is skipped when the last
+   * journaled entry already records the same state, so reload-safe
+   * re-activation does not duplicate entries.
    */
-  const setActive = (ws: WorkspaceInfo | null, ctx?: unknown): void => {
+  const setActive = (ws: WorkspaceInfo | null, ctx?: { sessionManager?: { getEntries: () => unknown[] } }): void => {
     active = ws;
     tracker.reset();
     if (ctx) refreshStatus(ctx, ws);
-    pi.appendEntry(JOURNAL_TYPE, { name: ws?.name ?? null });
+    const name = ws?.name ?? null;
+    if (!ctx || journaledActiveName(ctx) !== name) {
+      pi.appendEntry(JOURNAL_TYPE, { name });
+    }
   };
 
   registerToolOverrides(pi, {
     getActive,
     sessionCwd: getSessionCwd,
-    onFirstTouch: (root) => tracker.onTouch(root),
+    onFirstTouch: (root, touchedPath) => tracker.onTouch(root, touchedPath),
   });
   registerWorkspaceCommands(pi, { getActive, setActive, scope });
 
@@ -143,7 +132,7 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
     // sparse config object itself is never read key-by-key. The global
     // defaults config belongs to the global scope - a project-scoped
     // install resolves options against the built-in defaults only.
-    const globalDefaults = scope === "global" ? loadGlobalConfig() : ({} as WorkspaceOptions);
+    const globalDefaults = scope === "global" ? loadGlobalConfig().options : ({} as Partial<WorkspaceOptions>);
     for (const warning of warnings) {
       ctx.ui.notify(warning, "warning");
     }
@@ -154,22 +143,26 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
       );
     }
 
-    // 1. Auto-load: the session cwd equals a workspace's primary root and
-    //    its autoLoadInPrimary resolves true.
-    for (const { def, origin } of merged) {
-      const primary = def.roots.find((r) => r.name === def.primary);
-      if (primary && samePath(primary.path, ctx.cwd) && resolveOptions(def, globalDefaults).autoLoadInPrimary) {
-        const ws = toWorkspaceInfo(def, origin);
-        setActive(ws, ctx);
-        ctx.ui.notify(`Workspace '${ws.name}' auto-loaded (session directory is its primary root).`);
-        return;
-      }
+    // The containing set (D4): definitions where the session cwd sits
+    // inside any root. A cwd outside every root activates nothing and is
+    // never prompted (D2).
+    const containing = merged.filter(({ def }) => def.roots.some((r) => isInside(r.path, ctx.cwd)));
+
+    // 1. Auto-load: exactly one containing workspace whose activation
+    //    resolves "auto". Multiple containing workspaces always prompt
+    //    (disambiguation), even when all of them say "auto".
+    if (containing.length === 1 && resolveOptions(containing[0].def, globalDefaults).activation === "auto") {
+      const { def, origin } = containing[0];
+      const ws = toWorkspaceInfo(def, origin);
+      setActive(ws, ctx);
+      ctx.ui.notify(`Workspace '${ws.name}' auto-loaded (session directory is inside its roots).`);
+      return;
     }
 
     // 2. Session restore: the journal entry written by setActive is the
     //    resume signal. ReadonlySessionManager exposes getEntries(), so
     //    the last pi-workspaces:active entry of the current session
-    //    re-activates its workspace when the cwd matched nothing. The last
+    //    re-activates its workspace when no auto-load fired. The last
     //    entry wins; a journaled null (unload) restores nothing. A fresh
     //    session has no entries, so plain startups never restore.
     const journaled = journaledActiveName(ctx);
@@ -183,22 +176,15 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
       }
     }
 
-    // 3. Ask, but only when the cwd sits inside some workspace's
-    //    non-primary root: offer exactly those containing workspaces.
-    //    A cwd outside every root never prompts - an unrelated directory
-    //    must not be nagged just because definitions exist. The
-    //    promptInOtherDirs option gates this prompt per workspace, and
+    // 3. Ask, but only when the cwd sits inside at least one workspace's
+    //    roots: offer exactly the containing workspaces. This covers
+    //    activation "prompt" workspaces and multi-match disambiguation.
     //    "Don't load" stays as the escape hatch.
-    const candidates = merged.filter(
-      ({ def }) =>
-        def.roots.some((r) => r.name !== def.primary && isInside(r.path, ctx.cwd)) &&
-        resolveOptions(def, globalDefaults).promptInOtherDirs,
-    );
-    if (candidates.length > 0 && ctx.hasUI) {
-      const names = candidates.map((c) => c.def.name);
+    if (containing.length > 0 && ctx.hasUI) {
+      const names = containing.map((c) => c.def.name);
       const choice = await ctx.ui.select("Load a workspace for this session?", [...names, "Don't load"]);
       if (choice !== undefined && choice !== "Don't load") {
-        const entry = candidates.find((c) => c.def.name === choice);
+        const entry = containing.find((c) => c.def.name === choice);
         if (entry) {
           const ws = toWorkspaceInfo(entry.def, entry.origin);
           setActive(ws, ctx);

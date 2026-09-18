@@ -16,16 +16,15 @@ function makeFg(): { fg: (color: string, text: string) => string; calls: { color
   return { fg, calls };
 }
 
-function ws(roots: [string, boolean][], name = "demo", primary = "alpha"): WorkspaceInfo {
+function ws(roots: [string, boolean][], name = "demo"): WorkspaceInfo {
   return {
     name,
-    roots: roots.map(([rname, exists], i) => ({ name: rname, path: `/ws/${rname}`, exists })),
-    primary,
+    roots: roots.map(([rname, exists]) => ({ name: rname, path: `/ws/${rname}`, exists })),
     origin: "project",
   };
 }
 
-test("statusline: healthy format is '[ws] <name> (N roots) primary: <p>'", () => {
+test("statusline: healthy format is '[ws] <name> (N roots)'", () => {
   const healthy = ws([
     ["alpha", true],
     ["beta", true],
@@ -35,11 +34,11 @@ test("statusline: healthy format is '[ws] <name> (N roots) primary: <p>'", () =>
 
   const text = renderStatus(healthy, fg);
 
-  assert.equal(text, "<accent:[ws]> <accent:demo> <dim:(3 roots)> <dim:primary: alpha>");
+  assert.equal(text, "<accent:[ws]> <accent:demo> <dim:(3 roots)>");
   assert.deepEqual(
     calls.map((c) => c.color),
-    ["accent", "accent", "dim", "dim"],
-    "icon and name use accent, counts and primary use dim",
+    ["accent", "accent", "dim"],
+    "icon and name use accent, counts use dim",
   );
   assert.ok(!/[^\x00-\x7F]/.test(text), "status text must be pure ASCII");
 });
@@ -56,7 +55,7 @@ test("statusline: degraded format shows ok/N counts and one warning per missing 
 
   assert.equal(
     text,
-    "<accent:[ws]> <accent:demo> <dim:(1/3 roots)> <dim:primary: alpha>" +
+    "<accent:[ws]> <accent:demo> <dim:(1/3 roots)>" +
       "<warning: ! beta missing><warning: ! gamma missing>",
   );
   const warningCalls = calls.filter((c) => c.color === "warning");
@@ -85,7 +84,7 @@ test("refreshStatus: sets keyed status when active, clears with undefined when i
   ]));
   assert.equal(calls.length, 1);
   assert.equal(calls[0].key, "pi-workspaces");
-  assert.equal(calls[0].text, "[ws] demo (2 roots) primary: alpha");
+  assert.equal(calls[0].text, "[ws] demo (2 roots)");
 
   refreshStatus(ctx, null);
   assert.equal(calls.length, 2);
@@ -116,7 +115,7 @@ test("refreshStatus: survives pi's Theme class whose fg method relies on `this`"
   };
   refreshStatus(ctx, ws([["alpha", true]]));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].text, "<A:[ws]> <A:demo> <D:(1 roots)> <D:primary: alpha>");
+  assert.equal(calls[0].text, "<A:[ws]> <A:demo> <D:(1 roots)>");
 });
 
 test("refreshStatus: headless fallbacks - no theme, no ui, no setStatus", () => {
@@ -129,7 +128,7 @@ test("refreshStatus: headless fallbacks - no theme, no ui, no setStatus", () => 
   const headless = { ui: { theme: undefined, setStatus } };
   refreshStatus(headless, ws([["alpha", true]]));
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].text, "[ws] demo (1 roots) primary: alpha", "colors fall back to passthrough");
+  assert.equal(calls[0].text, "[ws] demo (1 roots)", "colors fall back to passthrough");
 
   // No ui at all, or ui without setStatus: must not throw.
   refreshStatus({}, ws([["alpha", true]]));

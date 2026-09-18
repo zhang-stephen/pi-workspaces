@@ -12,14 +12,15 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import type { WorkspaceInfo } from "./path-resolver.ts";
+import { isInside, type WorkspaceInfo } from "./path-resolver.ts";
 import {
   addRoot,
   globalWorkspacesDir,
   loadAll,
+  loadGlobalConfig,
   NAME_PATTERN,
-  projectWorkspacesDir,
   removeRoot,
+  resolveOptions,
   saveDefinition,
   toWorkspaceInfo,
   type InstallScope,
@@ -43,7 +44,7 @@ function usage(scope: InstallScope): string {
   load <name>             activate a workspace
   unload                  deactivate the active workspace
   create <name>           create a workspace with the current directory as its
-                          sole primary root (saved to the ${scope} source)
+                          sole root (saved to the ${scope} source)
   add [name] <path>       add a root to the active workspace (alias: add-root)
   remove <name>           remove a root from the active workspace (alias: remove-root)`;
 }
@@ -59,14 +60,13 @@ function formatRootLine(name: string, rootPath: string, exists: boolean): string
 
 /**
  * Multi-line status block for one workspace: header with name and origin,
- * the primary root, then every root with its availability marker. Pure
- * except for the fs check on definition roots (the WorkspaceInfo variant
- * carries exists flags already).
+ * then every root with its availability marker. Pure except for the fs
+ * check on definition roots (the WorkspaceInfo variant carries exists
+ * flags already).
  */
 export function formatStatus(ws: WorkspaceInfo): string {
   const lines = [
     `workspace '${ws.name}' (origin: ${ws.origin})`,
-    `primary: ${ws.primary}`,
     ...ws.roots.map((r) => formatRootLine(r.name, r.path, r.exists)),
   ];
   return lines.join("\n");
@@ -83,7 +83,7 @@ export function formatList(merged: LoadedDef[]): string {
   return merged
     .map(({ def, origin }) =>
       [
-        `'${def.name}' (origin: ${origin}, primary: ${def.primary})`,
+        `'${def.name}' (origin: ${origin})`,
         ...def.roots.map((r) => formatRootLine(r.name, r.path, rootExists(r))),
       ].join("\n"),
     )
@@ -114,9 +114,10 @@ function errorMessage(err: unknown): string {
  */
 export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
   pi.registerCommand("workspace", {
-    // Attribution is part of the description on purpose: pi's palette only
-    // prefixes a scope letter ([u]/[p]/[t]) for directory installs - the
-    // plugin name is rendered only for npm packages ([u:npm:...]).
+    // Attribution is part of the description on purpose (16.2, verified
+    // against pi's dist): the palette's source tag only prefixes a scope
+    // letter ([u]/[p]/[t]) for directory installs - the extension name is
+    // rendered only for npm/git package sources ([u:npm:...]).
     description:
       "pi-workspaces: manage multi-root workspaces (status, list, load, unload, create, add, remove)",
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
@@ -183,6 +184,21 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
   }
   const ws = toWorkspaceInfo(entry.def, entry.origin);
   deps.setActive(ws, ctx);
+  // D7: loading a workspace whose roots do not contain the cwd proceeds,
+  // but warns - bare relative paths stay anchored at the session directory.
+  // The global defaults config is only readable in global scope (D1).
+  const defaults = deps.scope === "global" ? loadGlobalConfig().options : {};
+  if (
+    resolveOptions(entry.def, defaults).warnOnUnrelatedLoad &&
+    !ws.roots.some((r) => isInside(r.path, ctx.cwd))
+  ) {
+    notify(
+      ctx,
+      `Warning: the session directory is not inside any root of '${ws.name}'; ` +
+        `bare relative paths stay anchored at the session directory (${ctx.cwd}).`,
+      "warning",
+    );
+  }
   notify(ctx, formatStatus(ws));
 }
 
@@ -207,26 +223,25 @@ async function createWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, 
     notify(ctx, `Illegal workspace name: '${name}' (must match ${NAME_PATTERN.source})`, "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd, deps.scope);
+  const { merged, projectDir } = loadAll(ctx.cwd, deps.scope);
   if (merged.some((m) => m.def.name === name)) {
     notify(ctx, `Workspace '${name}' already exists.`, "error");
     return;
   }
-  // The current directory becomes the sole primary root; the root name
-  // falls back to a safe alphabet so dotted/spaced dir names stay valid.
-  const rootName = primaryRootName(ctx.cwd);
+  // The current directory becomes the sole root; the root name falls back
+  // to a safe alphabet so dotted/spaced dir names stay valid.
+  const rootName = rootNameFromCwd(ctx.cwd);
   const def: WorkspaceDefinition = {
     name,
     version: 1,
     roots: [{ name: rootName, path: ctx.cwd }],
-    primary: rootName,
   };
   // The definition lands in the source matching the install scope: a
   // global install persists globally, anything else (project install or
-  // -e dev load) stays inside the project and never touches the global
-  // config directory.
+  // -e dev load) stays inside the discovered project source and never
+  // touches the global config directory.
   const origin = deps.scope;
-  const dir = origin === "project" ? projectWorkspacesDir(ctx.cwd) : globalWorkspacesDir();
+  const dir = origin === "project" ? projectDir : globalWorkspacesDir();
   await saveDefinition(dir, def);
   const ws = toWorkspaceInfo(def, origin);
   deps.setActive(ws, ctx);
@@ -268,7 +283,7 @@ async function changeRoots(
     notify(ctx, "No workspace is active; use /workspace load or /workspace create first.", "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd, deps.scope);
+  const { merged, projectDir } = loadAll(ctx.cwd, deps.scope);
   const entry = merged.find((m) => m.def.name === active.name);
   if (!entry) {
     notify(ctx, `Definition for active workspace '${active.name}' not found on disk; cannot persist changes.`, "error");
@@ -287,12 +302,12 @@ async function changeRoots(
     }
   } catch (err) {
     // addRoot/removeRoot validation errors (duplicate/illegal name,
-    // primary removal, unknown root) land here as notifications.
+    // last-root protection, unknown root) land here as notifications.
     notify(ctx, errorMessage(err), "error");
     return;
   }
 
-  const dir = entry.origin === "project" ? projectWorkspacesDir(ctx.cwd) : globalWorkspacesDir();
+  const dir = entry.origin === "project" ? projectDir : globalWorkspacesDir();
   await saveDefinition(dir, mutated);
   const ws = toWorkspaceInfo(mutated, entry.origin);
   deps.setActive(ws, ctx);
@@ -300,10 +315,10 @@ async function changeRoots(
 }
 
 /** Derive a valid root name from the cwd basename (dots/spaces -> "-"). */
-function primaryRootName(cwd: string): string {
+function rootNameFromCwd(cwd: string): string {
   const cleaned = path
     .basename(cwd)
     .replace(/[^A-Za-z0-9_-]+/g, "-")
     .replace(/^-+|-+$/g, "");
-  return cleaned.length > 0 ? cleaned : "primary";
+  return cleaned.length > 0 ? cleaned : "root";
 }

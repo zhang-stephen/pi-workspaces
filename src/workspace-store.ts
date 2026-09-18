@@ -1,22 +1,24 @@
 // Workspace store. Part 1 (above): definition-file schema validation,
 // dual-source merge by name (project wins), and the three-level options
-// chain - pure functions, zero IO. Part 2 (below): definition scanning and
-// atomic file IO, the tolerant global config, root health checks, and root
-// add/remove operations. Merge is per-name, never a full override:
+// chain - pure functions, zero IO. Part 2 (below): project-source
+// discovery by marker ascent, definition scanning and atomic file IO, the
+// tolerant global config, root health checks, and root add/remove
+// operations. Merge is per-name, never a full override:
 // global-only workspaces survive alongside project definitions (core design
 // constraint 3).
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
-import type { WorkspaceInfo } from "./path-resolver.ts";
+import { pathKey, type WorkspaceInfo } from "./path-resolver.ts";
 
 export interface RootDefinition { name: string; path: string }
-export interface WorkspaceOptions { autoLoadInPrimary: boolean; promptInOtherDirs: boolean }
+export type Activation = "auto" | "prompt";
+export interface WorkspaceOptions { activation: Activation; warnOnUnrelatedLoad: boolean }
 export interface WorkspaceDefinition {
   name: string;
   version: 1;
   roots: RootDefinition[];
-  primary: string;
   options?: Partial<WorkspaceOptions>;
 }
 export interface LoadedDef { def: WorkspaceDefinition; origin: "global" | "project" }
@@ -26,19 +28,24 @@ export interface LoadedDef { def: WorkspaceDefinition; origin: "global" | "proje
  * a global install under <agentDir>/extensions/ scans both definition
  * sources and reads the global defaults config; anything else (a project
  * install under <cwd>/.pi/extensions/, or an explicit -e dev path) is
- * project-scoped and only ever sees <cwd>/.pi/workspaces - global config
- * files are neither read nor written.
+ * project-scoped and only ever sees the discovered project source (D5) -
+ * global config files are neither read nor written.
  */
 export type InstallScope = "global" | "project";
 
-// Fallback of last resort for the options chain (workspace ?? defaults ?? builtin).
-export const BUILTIN_DEFAULTS: WorkspaceOptions = {
-  autoLoadInPrimary: true,
-  promptInOtherDirs: true,
-};
+// Fallback of last resort. The first two keys form the per-workspace
+// options chain (workspace ?? defaults ?? builtin); projectRootAscend is a
+// global-only knob (chicken-and-egg: it controls how definitions are found,
+// so no per-workspace override can be allowed - D5) and is consumed via
+// DEFAULT_PROJECT_ROOT_ASCEND / the global config, never via resolveOptions.
+export const BUILTIN_DEFAULTS = {
+  activation: "auto",
+  warnOnUnrelatedLoad: true,
+  projectRootAscend: 3,
+} as const satisfies WorkspaceOptions & { projectRootAscend: number };
 
 export const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
-const KNOWN_OPTIONS = ["autoLoadInPrimary", "promptInOtherDirs"] as const;
+const KNOWN_OPTIONS = ["activation", "warnOnUnrelatedLoad"] as const;
 
 type ValidationResult =
   | { ok: true; def: WorkspaceDefinition }
@@ -47,8 +54,11 @@ type ValidationResult =
 /**
  * Validate an untyped parsed-JSON value as a workspace definition. Returns a
  * normalized copy on success; rejects unknown versions, illegal workspace or
- * root names, duplicate root names, empty root lists, and a primary root
- * that is not among the declared roots.
+ * root names, duplicate root names, and empty root lists. The schema is the
+ * post-primary one only: unknown option keys (including the removed
+ * 'autoLoadInPrimary'/'promptInOtherDirs') fail the generic unknown-key
+ * check, and stale definitions are migrated by hand (D9, simplified: no
+ * dedicated legacy-key detection).
  */
 export function validateDefinition(data: unknown): ValidationResult {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
@@ -97,18 +107,10 @@ export function validateDefinition(data: unknown): ValidationResult {
     roots.push({ name: r.name, path: r.path });
   }
 
-  if (typeof d.primary !== "string" || !seen.has(d.primary)) {
-    const names = [...seen].map((n) => `'${n}'`).join(", ");
-    return {
-      ok: false,
-      error: `Primary root '${String(d.primary)}' is not one of the declared roots: ${names}`,
-    };
-  }
-
   let options: Partial<WorkspaceOptions> | undefined;
   if (d.options !== undefined) {
     if (typeof d.options !== "object" || d.options === null || Array.isArray(d.options)) {
-      return { ok: false, error: "'options' must be a JSON object mapping option names to booleans" };
+      return { ok: false, error: "'options' must be a JSON object mapping option names to values" };
     }
     const o = d.options as Record<string, unknown>;
     const parsed: Partial<WorkspaceOptions> = {};
@@ -116,15 +118,22 @@ export function validateDefinition(data: unknown): ValidationResult {
       if (!KNOWN_OPTIONS.includes(key as (typeof KNOWN_OPTIONS)[number])) {
         return { ok: false, error: `Unknown workspace option: '${key}'` };
       }
-      if (typeof o[key] !== "boolean") {
-        return { ok: false, error: `Workspace option '${key}' must be a boolean` };
+      if (key === "activation") {
+        if (o[key] !== "auto" && o[key] !== "prompt") {
+          return { ok: false, error: `Workspace option 'activation' must be "auto" or "prompt"` };
+        }
+        parsed.activation = o[key];
+      } else {
+        if (typeof o[key] !== "boolean") {
+          return { ok: false, error: `Workspace option '${key}' must be a boolean` };
+        }
+        parsed.warnOnUnrelatedLoad = o[key] as boolean;
       }
-      parsed[key as (typeof KNOWN_OPTIONS)[number]] = o[key] as boolean;
     }
     options = parsed;
   }
 
-  const def: WorkspaceDefinition = { name: d.name, version: 1, roots, primary: d.primary };
+  const def: WorkspaceDefinition = { name: d.name, version: 1, roots };
   if (options !== undefined) def.options = options;
   return { ok: true, def };
 }
@@ -161,12 +170,11 @@ export function mergeByName(
  * builtin defaults. Applied per key, so a partial workspace options object
  * only overrides the keys it sets.
  */
-export function resolveOptions(def: WorkspaceDefinition, defaults: WorkspaceOptions): WorkspaceOptions {
+export function resolveOptions(def: WorkspaceDefinition, defaults: Partial<WorkspaceOptions>): WorkspaceOptions {
   return {
-    autoLoadInPrimary:
-      def.options?.autoLoadInPrimary ?? defaults.autoLoadInPrimary ?? BUILTIN_DEFAULTS.autoLoadInPrimary,
-    promptInOtherDirs:
-      def.options?.promptInOtherDirs ?? defaults.promptInOtherDirs ?? BUILTIN_DEFAULTS.promptInOtherDirs,
+    activation: def.options?.activation ?? defaults.activation ?? BUILTIN_DEFAULTS.activation,
+    warnOnUnrelatedLoad:
+      def.options?.warnOnUnrelatedLoad ?? defaults.warnOnUnrelatedLoad ?? BUILTIN_DEFAULTS.warnOnUnrelatedLoad,
   };
 }
 
@@ -179,9 +187,46 @@ export function globalWorkspacesDir(): string {
   return path.join(getAgentDir(), "workspaces");
 }
 
-/** Project definition source: <cwd>/.pi/workspaces. */
-export function projectWorkspacesDir(cwd: string): string {
-  return path.join(cwd, ".pi", "workspaces");
+/** Root markers for project discovery (D5): the nearest ancestor directory
+ * containing any of these wins, even without a .pi/workspaces subdirectory. */
+export const PROJECT_MARKERS = [".pi", ".git", ".agents"] as const;
+
+/** Built-in ascent cap for project discovery (see BUILTIN_DEFAULTS). The
+ * global defaults config may override it via projectRootAscend (global
+ * scope only - the cap controls how definitions are found, so a
+ * project-scoped install cannot be allowed to widen its own search). */
+export const DEFAULT_PROJECT_ROOT_ASCEND: number = BUILTIN_DEFAULTS.projectRootAscend;
+
+/**
+ * Discover the project directory for definition scanning (D5): walk up from
+ * `cwd` at most `ascend` levels and stop at the first directory containing
+ * any root marker (.pi/.git/.agents). The nearest marker directory wins even
+ * when it has no .pi/workspaces subdirectory (or it is empty) - the project
+ * source is then simply empty and contributes no auto-load/prompt candidates
+ * (no error, no further ascent into outer projects). Never ascends above the
+ * user's home directory. When no ancestor within the cap has a marker, the
+ * project dir is the cwd itself.
+ */
+export function discoverProjectDir(cwd: string, ascend: number = DEFAULT_PROJECT_ROOT_ASCEND): string {
+  const start = path.resolve(cwd);
+  const home = pathKey(os.homedir());
+  let dir = start;
+  for (let level = 0; ; level++) {
+    if (PROJECT_MARKERS.some((marker) => fs.existsSync(path.join(dir, marker)))) {
+      return dir;
+    }
+    if (level >= ascend) break; // cap hit: fall back to the cwd itself
+    if (pathKey(dir) === home) break; // never ascend above the home directory
+    const parent = path.dirname(dir);
+    if (parent === dir) break; // filesystem root
+    dir = parent;
+  }
+  return start;
+}
+
+/** Project definition source: discoverProjectDir(cwd)/.pi/workspaces (D5). */
+export function projectWorkspacesDir(cwd: string, ascend?: number): string {
+  return path.join(discoverProjectDir(cwd, ascend), ".pi", "workspaces");
 }
 
 /**
@@ -228,37 +273,61 @@ export function scanSource(
 }
 
 /**
- * Load the definition sources visible to the given install scope. Global
- * scope scans both sources and merges per name (project wins); warnings
- * from both scans are concatenated and name collisions are reported so
- * callers can notify the user that the project copy overrode the global.
- * Project scope scans only the project source (<cwd>/.pi/workspaces), so
- * collisions are impossible and the global directory is never touched.
+ * Load the definition sources visible to the given install scope. The
+ * project source is discovered by marker ascent (D5): the ascent cap comes
+ * from the global defaults config in global scope (chicken-and-egg: the cap
+ * controls how definitions are found), while project-scoped installs always
+ * use the built-in value. Global scope scans both sources and merges per
+ * name (project wins); warnings from both scans are concatenated and name
+ * collisions are reported so callers can notify the user that the project
+ * copy overrode the global. Project scope scans only the discovered project
+ * source, so collisions are impossible and the global directory is never
+ * touched. The returned projectDir is the resolved project source
+ * directory, so callers persisting project-origin definitions write back to
+ * the directory they were actually loaded from.
  */
-export function loadAll(cwd: string, scope: InstallScope): { merged: LoadedDef[]; collisions: string[]; warnings: string[] } {
-  const projectScan = scanSource(projectWorkspacesDir(cwd), "project");
+export function loadAll(
+  cwd: string,
+  scope: InstallScope,
+): { merged: LoadedDef[]; collisions: string[]; warnings: string[]; projectDir: string } {
+  const ascend =
+    scope === "global"
+      ? (loadGlobalConfig().projectRootAscend ?? DEFAULT_PROJECT_ROOT_ASCEND)
+      : DEFAULT_PROJECT_ROOT_ASCEND;
+  const projectDir = projectWorkspacesDir(cwd, ascend);
+  const projectScan = scanSource(projectDir, "project");
   if (scope === "project") {
     return {
       merged: projectScan.defs.map((def) => ({ def, origin: "project" as const })),
       collisions: [],
       warnings: projectScan.warnings,
+      projectDir,
     };
   }
   const globalScan = scanSource(globalWorkspacesDir(), "global");
   const { merged, collisions } = mergeByName(globalScan.defs, projectScan.defs);
-  return { merged, collisions, warnings: [...globalScan.warnings, ...projectScan.warnings] };
+  return { merged, collisions, warnings: [...globalScan.warnings, ...projectScan.warnings], projectDir };
 }
 
 /**
- * Load the global default option config (~/.pi/agent/pi-workspaces.json,
- * shape { "defaults": { "autoLoadInPrimary": bool, ... } }). Tolerant by
- * design: any problem (missing file, corrupt JSON, wrong shape, non-boolean
- * values, unknown keys) degrades to "that key is unset" and never throws,
- * leaving the fallback to the caller's options chain. The result may be
- * sparse; resolveOptions falls back per key.
+ * The global defaults config (~/.pi/agent/pi-workspaces.json), shape:
+ * { "defaults": { "activation": "auto"|"prompt", "warnOnUnrelatedLoad": bool },
+ *   "projectRootAscend": number }. Read in global scope only.
  */
-export function loadGlobalConfig(): WorkspaceOptions {
-  const config = {} as WorkspaceOptions;
+export interface GlobalConfig {
+  options: Partial<WorkspaceOptions>;
+  projectRootAscend?: number;
+}
+
+/**
+ * Load the global defaults config. Tolerant by design: any problem (missing
+ * file, corrupt JSON, wrong shape, wrongly typed values, unknown keys)
+ * degrades to "that key is unset" and never throws, leaving the fallback to
+ * the caller's options chain. The result may be sparse; resolveOptions
+ * falls back per key.
+ */
+export function loadGlobalConfig(): GlobalConfig {
+  const config: GlobalConfig = { options: {} };
   let data: unknown;
   try {
     data = JSON.parse(fs.readFileSync(path.join(getAgentDir(), "pi-workspaces.json"), "utf8"));
@@ -266,12 +335,16 @@ export function loadGlobalConfig(): WorkspaceOptions {
     return config;
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) return config;
-  const defaults = (data as Record<string, unknown>).defaults;
-  if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) return config;
-  for (const key of KNOWN_OPTIONS) {
-    const value = (defaults as Record<string, unknown>)[key];
-    if (typeof value === "boolean") config[key] = value;
+  const record = data as Record<string, unknown>;
+  const ascend = record.projectRootAscend;
+  if (typeof ascend === "number" && Number.isInteger(ascend) && ascend >= 0) {
+    config.projectRootAscend = ascend;
   }
+  const defaults = record.defaults;
+  if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) return config;
+  const d = defaults as Record<string, unknown>;
+  if (d.activation === "auto" || d.activation === "prompt") config.options.activation = d.activation;
+  if (typeof d.warnOnUnrelatedLoad === "boolean") config.options.warnOnUnrelatedLoad = d.warnOnUnrelatedLoad;
   return config;
 }
 
@@ -301,7 +374,6 @@ export async function saveDefinition(dir: string, def: WorkspaceDefinition): Pro
 export function toWorkspaceInfo(def: WorkspaceDefinition, origin: "global" | "project"): WorkspaceInfo {
   return {
     name: def.name,
-    primary: def.primary,
     origin,
     roots: def.roots.map((root) => {
       if (!fs.existsSync(root.path)) {
@@ -319,8 +391,8 @@ export function toWorkspaceInfo(def: WorkspaceDefinition, origin: "global" | "pr
 /**
  * Return a copy of `def` with one root appended. A null name defaults to the
  * basename of `rootPath`. Throws on an illegal name (see NAME_PATTERN), a
- * name that collides with an existing root, or an empty path. The primary
- * root is left untouched; the input definition is not mutated.
+ * name that collides with an existing root, or an empty path. The input
+ * definition is not mutated.
  */
 export function addRoot(def: WorkspaceDefinition, name: string | null, rootPath: string): WorkspaceDefinition {
   if (typeof rootPath !== "string" || rootPath.length === 0) {
@@ -337,17 +409,17 @@ export function addRoot(def: WorkspaceDefinition, name: string | null, rootPath:
 }
 
 /**
- * Return a copy of `def` with the named root removed. Throws when removing
- * the primary root (forbidden: a workspace must always have one) or when no
- * such root exists. Since the primary can never be removed, the remaining
- * roots are never empty. The input definition is not mutated.
+ * Return a copy of `def` with the named root removed. Throws when no such
+ * root exists, or when the workspace would be left without roots: the last
+ * remaining root is protected (D8, replacing the old primary protection).
+ * The input definition is not mutated.
  */
 export function removeRoot(def: WorkspaceDefinition, name: string): WorkspaceDefinition {
-  if (name === def.primary) {
-    throw new Error(`Cannot remove primary root '${name}' of workspace '${def.name}'`);
-  }
   if (!def.roots.some((root) => root.name === name)) {
     throw new Error(`Unknown root '${name}' in workspace '${def.name}'`);
+  }
+  if (def.roots.length === 1) {
+    throw new Error(`Cannot remove the last root of workspace '${def.name}'`);
   }
   return { ...def, roots: def.roots.filter((root) => root.name !== name) };
 }
