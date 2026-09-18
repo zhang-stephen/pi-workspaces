@@ -39,7 +39,7 @@ src/prompt-inject.ts     # before_agent_start injection + on-demand constraint-f
 src/statusline.ts        # Footer status display
 src/autocomplete.ts      # Editor @root completion provider
 test/                    # node:test tests (pure-function unit tests + temp-dir integration tests)
-docs/                    # Design specs and docs (kept out of git for now)
+docs/                    # Design specs and docs (committed)
 ```
 
 ## Core Design Constraints (read before changing anything)
@@ -62,5 +62,4 @@ docs/                    # Design specs and docs (kept out of git for now)
 ## Commit Conventions
 
 - Conventional Commits with a scope naming the touched component: `feat(src):`, `fix(src):`, `test(test):`, `docs:`, English descriptions
-- The `docs/` directory stays uncommitted for now (working tree only)
 - Run `node --test "test/**/*.ts"` before every commit
