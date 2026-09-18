@@ -1,6 +1,6 @@
 // Workspace store. Part 1 (above): definition-file schema validation,
-// dual-source merge by name (project wins), and the three-level options
-// chain - pure functions, zero IO. Part 2 (below): project-source
+// dual-source merge by name (project wins), and flat session-config
+// resolution - pure functions, zero IO. Part 2 (below): project-source
 // discovery by marker ascent, definition scanning and atomic file IO, the
 // tolerant global config, root health checks, and root add/remove
 // operations. Merge is per-name, never a full override:
@@ -14,12 +14,22 @@ import { pathKey, type WorkspaceInfo } from "./path-resolver.ts";
 
 export interface RootDefinition { name: string; path: string }
 export type Activation = "auto" | "prompt";
-export interface WorkspaceOptions { activation: Activation; warnOnUnrelatedLoad: boolean }
 export interface WorkspaceDefinition {
   name: string;
   version: 1;
   roots: RootDefinition[];
-  options?: Partial<WorkspaceOptions>;
+}
+/**
+ * The plugin config as one flat struct (2026-09-19 spec, D4): resolved per
+ * key over builtin < global (<agentDir>/pi-workspaces.json) < project
+ * (<projectRoot>/.pi/pi-workspaces.json). Definitions carry no options of
+ * their own - activation is a property of the project/directory context,
+ * not of an individual root set.
+ */
+export interface WorkspaceConfig {
+  activation: Activation;
+  warnOnUnrelatedLoad: boolean;
+  projectRootAscend: number;
 }
 export interface LoadedDef { def: WorkspaceDefinition; origin: "global" | "project" }
 
@@ -33,19 +43,19 @@ export interface LoadedDef { def: WorkspaceDefinition; origin: "global" | "proje
  */
 export type InstallScope = "global" | "project";
 
-// Fallback of last resort. The first two keys form the per-workspace
-// options chain (workspace ?? defaults ?? builtin); projectRootAscend is a
-// global-only knob (chicken-and-egg: it controls how definitions are found,
-// so no per-workspace override can be allowed - D5) and is consumed via
-// DEFAULT_PROJECT_ROOT_ASCEND / the global config, never via resolveOptions.
+// Fallback of last resort for every WorkspaceConfig key. projectRootAscend
+// is a global-only knob (chicken-and-egg: it controls how definitions are
+// found, so no project-level override can be allowed - 2026-09-19 spec D4)
+// and is consumed via DEFAULT_PROJECT_ROOT_ASCEND / the global config only.
 export const BUILTIN_DEFAULTS = {
   activation: "auto",
   warnOnUnrelatedLoad: true,
   projectRootAscend: 3,
-} as const satisfies WorkspaceOptions & { projectRootAscend: number };
+} as const satisfies WorkspaceConfig;
 
 export const NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
-const KNOWN_OPTIONS = ["activation", "warnOnUnrelatedLoad"] as const;
+/** The complete top-level definition schema: anything else is rejected. */
+const ALLOWED_DEFINITION_KEYS = ["name", "version", "roots"] as const;
 
 type ValidationResult =
   | { ok: true; def: WorkspaceDefinition }
@@ -54,17 +64,23 @@ type ValidationResult =
 /**
  * Validate an untyped parsed-JSON value as a workspace definition. Returns a
  * normalized copy on success; rejects unknown versions, illegal workspace or
- * root names, duplicate root names, and empty root lists. The schema is the
- * post-primary one only: unknown option keys (including the removed
- * 'autoLoadInPrimary'/'promptInOtherDirs') fail the generic unknown-key
- * check, and stale definitions are migrated by hand (D9, simplified: no
- * dedicated legacy-key detection).
+ * root names, duplicate root names, empty root lists, and unknown top-level
+ * keys (the schema is name/version/roots only - the removed 'options' and
+ * legacy 'primary'/'autoLoadInPrimary' keys all fail the generic check).
+ * Stale definitions are migrated by hand (D9, simplified: no dedicated
+ * legacy-key detection).
  */
 export function validateDefinition(data: unknown): ValidationResult {
   if (typeof data !== "object" || data === null || Array.isArray(data)) {
     return { ok: false, error: "Workspace definition must be a JSON object" };
   }
   const d = data as Record<string, unknown>;
+
+  for (const key of Object.keys(d)) {
+    if (!ALLOWED_DEFINITION_KEYS.includes(key as (typeof ALLOWED_DEFINITION_KEYS)[number])) {
+      return { ok: false, error: `Unknown workspace definition key: '${key}'` };
+    }
+  }
 
   if (d.version !== 1) {
     return {
@@ -107,34 +123,7 @@ export function validateDefinition(data: unknown): ValidationResult {
     roots.push({ name: r.name, path: r.path });
   }
 
-  let options: Partial<WorkspaceOptions> | undefined;
-  if (d.options !== undefined) {
-    if (typeof d.options !== "object" || d.options === null || Array.isArray(d.options)) {
-      return { ok: false, error: "'options' must be a JSON object mapping option names to values" };
-    }
-    const o = d.options as Record<string, unknown>;
-    const parsed: Partial<WorkspaceOptions> = {};
-    for (const key of Object.keys(o)) {
-      if (!KNOWN_OPTIONS.includes(key as (typeof KNOWN_OPTIONS)[number])) {
-        return { ok: false, error: `Unknown workspace option: '${key}'` };
-      }
-      if (key === "activation") {
-        if (o[key] !== "auto" && o[key] !== "prompt") {
-          return { ok: false, error: `Workspace option 'activation' must be "auto" or "prompt"` };
-        }
-        parsed.activation = o[key];
-      } else {
-        if (typeof o[key] !== "boolean") {
-          return { ok: false, error: `Workspace option '${key}' must be a boolean` };
-        }
-        parsed.warnOnUnrelatedLoad = o[key] as boolean;
-      }
-    }
-    options = parsed;
-  }
-
   const def: WorkspaceDefinition = { name: d.name, version: 1, roots };
-  if (options !== undefined) def.options = options;
   return { ok: true, def };
 }
 
@@ -169,16 +158,21 @@ export function mergeByName(
 }
 
 /**
- * Resolve the effective options for a workspace: an option set on the
- * definition wins; otherwise the global defaults config; otherwise the
- * builtin defaults. Applied per key, so a partial workspace options object
- * only overrides the keys it sets.
+ * Resolve the effective session config: the project file wins per key;
+ * otherwise the global config; otherwise the builtin defaults. Applied per
+ * key, so partial config files only override the keys they set.
+ * projectRootAscend deliberately ignores the project level: the ascent cap
+ * controls how the project itself is discovered (chicken-and-egg, D4).
  */
-export function resolveOptions(def: WorkspaceDefinition, defaults: Partial<WorkspaceOptions>): WorkspaceOptions {
+export function resolveConfig(
+  project: Partial<WorkspaceConfig>,
+  global: Partial<WorkspaceConfig>,
+): WorkspaceConfig {
   return {
-    activation: def.options?.activation ?? defaults.activation ?? BUILTIN_DEFAULTS.activation,
+    activation: project.activation ?? global.activation ?? BUILTIN_DEFAULTS.activation,
     warnOnUnrelatedLoad:
-      def.options?.warnOnUnrelatedLoad ?? defaults.warnOnUnrelatedLoad ?? BUILTIN_DEFAULTS.warnOnUnrelatedLoad,
+      project.warnOnUnrelatedLoad ?? global.warnOnUnrelatedLoad ?? BUILTIN_DEFAULTS.warnOnUnrelatedLoad,
+    projectRootAscend: global.projectRootAscend ?? BUILTIN_DEFAULTS.projectRootAscend,
   };
 }
 
@@ -289,16 +283,26 @@ export function scanSource(
  * source, so collisions are impossible and the global directory is never
  * touched. The returned projectDir is the resolved project source
  * directory, so callers persisting project-origin definitions write back to
- * the directory they were actually loaded from.
+ * the directory they were actually loaded from; projectRoot is the
+ * discovered project directory (the marker dir) that anchors the project
+ * config file.
  */
 export function loadAll(
   cwd: string,
   scope: InstallScope,
-): { merged: LoadedDef[]; shadowed: LoadedDef[]; collisions: string[]; warnings: string[]; projectDir: string } {
+): {
+  merged: LoadedDef[];
+  shadowed: LoadedDef[];
+  collisions: string[];
+  warnings: string[];
+  projectDir: string;
+  projectRoot: string;
+} {
   const ascend =
     scope === "global"
       ? (loadGlobalConfig().projectRootAscend ?? DEFAULT_PROJECT_ROOT_ASCEND)
       : DEFAULT_PROJECT_ROOT_ASCEND;
+  const projectRoot = discoverProjectDir(cwd, ascend);
   const projectDir = projectWorkspacesDir(cwd, ascend);
   const projectScan = scanSource(projectDir, "project");
   if (scope === "project") {
@@ -308,6 +312,7 @@ export function loadAll(
       collisions: [],
       warnings: projectScan.warnings,
       projectDir,
+      projectRoot,
     };
   }
   const globalScan = scanSource(globalWorkspacesDir(), "global");
@@ -318,46 +323,65 @@ export function loadAll(
     collisions,
     warnings: [...globalScan.warnings, ...projectScan.warnings],
     projectDir,
+    projectRoot,
   };
 }
 
-/**
- * The global defaults config (~/.pi/agent/pi-workspaces.json), shape:
- * { "defaults": { "activation": "auto"|"prompt", "warnOnUnrelatedLoad": bool },
- *   "projectRootAscend": number }. Read in global scope only.
- */
-export interface GlobalConfig {
-  options: Partial<WorkspaceOptions>;
-  projectRootAscend?: number;
+/** Global config file: <agentDir>/pi-workspaces.json (flat, see D4). */
+export function globalConfigFile(): string {
+  return path.join(getAgentDir(), "pi-workspaces.json");
+}
+
+/** Project config file: <projectRoot>/.pi/pi-workspaces.json (D4). */
+export function projectConfigFile(projectDir: string): string {
+  return path.join(projectDir, ".pi", "pi-workspaces.json");
 }
 
 /**
- * Load the global defaults config. Tolerant by design: any problem (missing
- * file, corrupt JSON, wrong shape, wrongly typed values, unknown keys)
- * degrades to "that key is unset" and never throws, leaving the fallback to
- * the caller's options chain. The result may be sparse; resolveOptions
- * falls back per key.
+ * Per-key tolerant parse of one flat config object: a wrong-typed value or
+ * unknown key degrades to "that key is unset", a missing/unreadable file to
+ * an empty partial. readAscend=false skips projectRootAscend entirely - the
+ * ascent cap is a global-only knob (D4).
  */
-export function loadGlobalConfig(): GlobalConfig {
-  const config: GlobalConfig = { options: {} };
+function parseFlatConfig(file: string, readAscend: boolean): Partial<WorkspaceConfig> {
+  const config: Partial<WorkspaceConfig> = {};
   let data: unknown;
   try {
-    data = JSON.parse(fs.readFileSync(path.join(getAgentDir(), "pi-workspaces.json"), "utf8"));
+    data = JSON.parse(fs.readFileSync(file, "utf8"));
   } catch {
     return config;
   }
   if (typeof data !== "object" || data === null || Array.isArray(data)) return config;
   const record = data as Record<string, unknown>;
-  const ascend = record.projectRootAscend;
-  if (typeof ascend === "number" && Number.isInteger(ascend) && ascend >= 0) {
-    config.projectRootAscend = ascend;
+  if (record.activation === "auto" || record.activation === "prompt") config.activation = record.activation;
+  if (typeof record.warnOnUnrelatedLoad === "boolean") config.warnOnUnrelatedLoad = record.warnOnUnrelatedLoad;
+  if (readAscend) {
+    const ascend = record.projectRootAscend;
+    if (typeof ascend === "number" && Number.isInteger(ascend) && ascend >= 0) {
+      config.projectRootAscend = ascend;
+    }
   }
-  const defaults = record.defaults;
-  if (typeof defaults !== "object" || defaults === null || Array.isArray(defaults)) return config;
-  const d = defaults as Record<string, unknown>;
-  if (d.activation === "auto" || d.activation === "prompt") config.options.activation = d.activation;
-  if (typeof d.warnOnUnrelatedLoad === "boolean") config.options.warnOnUnrelatedLoad = d.warnOnUnrelatedLoad;
   return config;
+}
+
+/**
+ * Load the global config. Tolerant by design: any problem (missing file,
+ * corrupt JSON, wrong shape, wrongly typed values, unknown keys) degrades
+ * to "that key is unset" and never throws; resolveConfig falls back per
+ * key. Read in global scope only.
+ */
+export function loadGlobalConfig(): Partial<WorkspaceConfig> {
+  return parseFlatConfig(globalConfigFile(), true);
+}
+
+/**
+ * Load the project config (<projectRoot>/.pi/pi-workspaces.json). Same
+ * tolerance as loadGlobalConfig. projectRootAscend is not read here: the
+ * ascent cap controls how the project itself is discovered, so it is a
+ * global-only knob (D4).
+ */
+export function loadProjectConfig(projectDir: string): Partial<WorkspaceConfig> {
+  return parseFlatConfig(projectConfigFile(projectDir), false);
 }
 
 /**

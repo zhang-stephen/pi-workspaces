@@ -1,12 +1,12 @@
 // Unit tests for src/workspace-store.ts (definition validation, dual-source
-// merge-by-name, three-level options chain). All pure functions, no IO, so
+// merge-by-name, flat config resolution). All pure functions, no IO, so
 // tests use synthetic definitions with paths that never touch the filesystem.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   BUILTIN_DEFAULTS,
   mergeByName,
-  resolveOptions,
+  resolveConfig,
   validateDefinition,
   type WorkspaceDefinition,
 } from "../src/workspace-store.ts";
@@ -23,15 +23,6 @@ const VALID: WorkspaceDefinition = {
 test("valid definition passes validation", () => {
   const minimal = validateDefinition(VALID);
   assert.deepEqual(minimal, { ok: true, def: VALID });
-
-  const withOptions = validateDefinition({
-    ...VALID,
-    options: { activation: "prompt", warnOnUnrelatedLoad: false },
-  });
-  assert.deepEqual(withOptions, {
-    ok: true,
-    def: { ...VALID, options: { activation: "prompt", warnOnUnrelatedLoad: false } },
-  });
 });
 
 test("unknown version is rejected", () => {
@@ -87,47 +78,19 @@ test("empty roots are rejected", () => {
   }
 });
 
-// D9 (simplified): no dedicated legacy-key detection. A stale 'primary'
-// field is simply not part of the schema anymore; legacy option keys hit
-// the generic unknown-option rejection below. Definitions are migrated by
-// hand.
-test("a stale 'primary' field is no longer part of the schema", () => {
-  const result = validateDefinition({ ...VALID, primary: "app" });
-  assert.equal(result.ok, true);
-  if (result.ok) {
-    assert.equal("primary" in result.def, false, "the normalized copy drops it");
-  }
-});
-
-test("legacy option keys fail the generic unknown-option check", () => {
-  for (const key of ["autoLoadInPrimary", "promptInOtherDirs"]) {
-    const result = validateDefinition({ ...VALID, options: { [key]: true } });
+// D9 (simplified): no dedicated legacy-key detection. The schema is
+// name/version/roots only - stale 'primary', the removed 'options' object,
+// and legacy option keys all fail the generic unknown-key rejection.
+// Definitions are migrated by hand; invalid files are skipped silently at
+// session_start and surface via /workspace list (2026-09-19 spec D1).
+test("unknown top-level keys are rejected with the key named", () => {
+  for (const key of ["primary", "options", "autoLoadInPrimary", "promptInOtherDirs"]) {
+    const result = validateDefinition({ ...VALID, [key]: "app" });
     assert.equal(result.ok, false, key);
     if (!result.ok) {
-      assert.match(result.error, /unknown workspace option/i);
+      assert.match(result.error, /unknown workspace definition key/i);
       assert.ok(result.error.includes(`'${key}'`), `error names '${key}': ${result.error}`);
     }
-  }
-});
-
-test("option values are type-checked; unknown options are rejected", () => {
-  const badActivation = validateDefinition({ ...VALID, options: { activation: "sometimes" } });
-  assert.equal(badActivation.ok, false);
-  if (!badActivation.ok) {
-    assert.match(badActivation.error, /activation/);
-  }
-
-  const badWarn = validateDefinition({ ...VALID, options: { warnOnUnrelatedLoad: "yes" } });
-  assert.equal(badWarn.ok, false);
-  if (!badWarn.ok) {
-    assert.match(badWarn.error, /warnOnUnrelatedLoad/);
-  }
-
-  const unknown = validateDefinition({ ...VALID, options: { nope: true } });
-  assert.equal(unknown.ok, false);
-  if (!unknown.ok) {
-    assert.match(unknown.error, /unknown workspace option/i);
-    assert.match(unknown.error, /nope/);
   }
 });
 
@@ -163,29 +126,34 @@ test("mergeByName: project wins, global-only names survive, collisions reported"
   assert.equal(merged.find((m) => m.def.name === "shared")?.def, sharedProject);
 });
 
-test("resolveOptions: workspace > defaults > builtin, per key", () => {
+test("resolveConfig: project > global > builtin, per key", () => {
   assert.deepEqual(BUILTIN_DEFAULTS, { activation: "auto", warnOnUnrelatedLoad: true, projectRootAscend: 3 });
 
-  // Level 1: a workspace option wins over the defaults.
-  const overridden: WorkspaceDefinition = {
-    ...VALID,
-    options: { activation: "prompt" },
-  };
+  // Level 1: the project file wins over the global config.
   assert.deepEqual(
-    resolveOptions(overridden, { activation: "auto", warnOnUnrelatedLoad: false }),
-    { activation: "prompt", warnOnUnrelatedLoad: false },
+    resolveConfig(
+      { activation: "prompt", warnOnUnrelatedLoad: false },
+      { activation: "auto", warnOnUnrelatedLoad: true },
+    ),
+    { activation: "prompt", warnOnUnrelatedLoad: false, projectRootAscend: 3 },
   );
 
-  // Level 2: keys the workspace leaves unset fall through to the defaults.
+  // Level 2: keys the project file leaves unset fall through to the
+  // global config, per key.
   assert.deepEqual(
-    resolveOptions(VALID, { activation: "prompt", warnOnUnrelatedLoad: false }),
-    { activation: "prompt", warnOnUnrelatedLoad: false },
+    resolveConfig({ activation: "prompt" }, { activation: "auto", warnOnUnrelatedLoad: false, projectRootAscend: 5 }),
+    { activation: "prompt", warnOnUnrelatedLoad: false, projectRootAscend: 5 },
   );
 
-  // Level 3: keys missing from the defaults fall through to the builtin
-  // defaults (simulated sparse defaults; real callers pass a loaded config).
-  assert.deepEqual(resolveOptions(VALID, { warnOnUnrelatedLoad: false }), {
+  // Level 3: keys missing everywhere fall through to the builtin defaults.
+  assert.deepEqual(resolveConfig({}, {}), {
     activation: "auto",
-    warnOnUnrelatedLoad: false,
+    warnOnUnrelatedLoad: true,
+    projectRootAscend: 3,
   });
+
+  // projectRootAscend is a global-only knob: a project-level value is
+  // ignored even when present in the partial (2026-09-19 spec, D4).
+  assert.equal(resolveConfig({ projectRootAscend: 9 }, {}).projectRootAscend, 3);
+  assert.equal(resolveConfig({ projectRootAscend: 9 }, { projectRootAscend: 5 }).projectRootAscend, 5);
 });

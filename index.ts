@@ -31,10 +31,10 @@ import { registerToolOverrides } from "./src/tools.ts";
 import {
   loadAll,
   loadGlobalConfig,
-  resolveOptions,
+  loadProjectConfig,
+  resolveConfig,
   toWorkspaceInfo,
   type InstallScope,
-  type WorkspaceOptions,
 } from "./src/workspace-store.ts";
 
 /** Journal entry type: the active workspace name, recorded on every switch. */
@@ -132,7 +132,7 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
       ctx.ui.addAutocompleteProvider(createAutocompleteProvider(getActive, ctx.cwd));
     }
 
-    const { merged, shadowed, collisions } = loadAll(ctx.cwd, scope);
+    const { merged, shadowed, collisions, projectRoot } = loadAll(ctx.cwd, scope);
     // Scan diagnostics (corrupt/invalid definition files) are silently
     // skipped (2026-09-19 spec D1): a broken file in an unrelated source
     // must not pollute sessions that cannot even attribute it. The
@@ -140,7 +140,11 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
     //
     // Collision notices are relevance-gated (D2): the info line below
     // accompanies only activations of a collided workspace.
-    const globalDefaults = scope === "global" ? loadGlobalConfig().options : ({} as Partial<WorkspaceOptions>);
+    //
+    // The session config is resolved once (D4): the project file wins per
+    // key over the global file (global scope only), builtin defaults fill
+    // the rest. Project-scoped installs never read the global config file.
+    const config = resolveConfig(loadProjectConfig(projectRoot), scope === "global" ? loadGlobalConfig() : {});
     const collisionNotice = (name: string): string | undefined =>
       collisions.includes(name)
         ? `Workspace '${name}' is also defined in the global source; the project definition wins.`
@@ -154,7 +158,7 @@ export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = det
     // 1. Auto-load: exactly one containing workspace whose activation
     //    resolves "auto". Multiple containing workspaces always prompt
     //    (disambiguation), even when all of them say "auto".
-    if (containing.length === 1 && resolveOptions(containing[0].def, globalDefaults).activation === "auto") {
+    if (containing.length === 1 && config.activation === "auto") {
       const { def, origin } = containing[0];
       const ws = toWorkspaceInfo(def, origin);
       setActive(ws, ctx);

@@ -489,11 +489,13 @@ test("load of an unrelated workspace stays silent with warnOnUnrelatedLoad: fals
   const prev = process.env.PI_CODING_AGENT_DIR;
   process.env.PI_CODING_AGENT_DIR = agentDir;
   try {
+    // warnOnUnrelatedLoad: false comes from the project config file (D4);
+    // definitions carry no options.
+    writeFile(cwd, path.join(".pi", "pi-workspaces.json"), JSON.stringify({ warnOnUnrelatedLoad: false }));
     writeFile(cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
       name: "demo",
       version: 1,
       roots: [{ name: "app", path: elsewhere }],
-      options: { warnOnUnrelatedLoad: false },
     }));
 
     let active: WorkspaceInfo | null = null;

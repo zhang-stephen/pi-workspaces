@@ -302,12 +302,12 @@ test("session_start: selecting a collided workspace in the prompt appends the in
   const fx = isolatedFixture();
   try {
     markProjectRoot(fx.cwd);
-    // activation "prompt" (per-workspace option at this stage) + collision:
+    // activation "prompt" via the project config file (D4) + collision:
     // the user's selection activates with the Case A info line.
+    writeFile(fx.cwd, path.join(".pi", "pi-workspaces.json"), JSON.stringify({ activation: "prompt" }));
     writeFile(fx.cwd, path.join(".pi", "workspaces", "demo.json"), JSON.stringify({
       name: "demo",
       version: 1,
-      options: { activation: "prompt" },
       roots: [{ name: "app", path: fx.cwd }],
     }));
     writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify({
@@ -458,11 +458,13 @@ test("session_start prompts for a single containing workspace with activation 'p
   const fx = isolatedFixture();
   try {
     markProjectRoot(fx.cwd);
+    // activation "prompt" comes from the project config file now (D4) -
+    // definitions carry no options of their own.
+    writeFile(fx.cwd, path.join(".pi", "pi-workspaces.json"), JSON.stringify({ activation: "prompt" }));
     const holderDef = {
       name: "holder",
       version: 1,
       roots: [{ name: "app", path: fx.cwd }],
-      options: { activation: "prompt" },
     };
     const otherDef = {
       name: "other",
@@ -570,22 +572,22 @@ test("session_start never prompts when the cwd is outside every workspace root",
   }
 });
 
-test("project scope sees only the project source and ignores the global defaults config", async () => {
+test("project scope sees only the project source and ignores the global config", async () => {
   const fx = isolatedFixture();
   const rootDir = makeTempDir("pi-workspaces-root-");
   try {
     // A global definition that must stay invisible in project scope, and a
-    // global defaults config that must not be read either.
+    // global config file that must not be read either.
     const ghostDef = {
       name: "ghost",
       version: 1,
       roots: [{ name: "g", path: rootDir }],
     };
     writeFile(fx.agentDir, path.join("workspaces", "ghost.json"), JSON.stringify(ghostDef));
-    writeFile(fx.agentDir, "pi-workspaces.json", JSON.stringify({ defaults: { activation: "prompt" } }));
+    writeFile(fx.agentDir, "pi-workspaces.json", JSON.stringify({ activation: "prompt" }));
     // The project definition lives under <cwd>/.pi/workspaces and contains
-    // the cwd, so auto-load fires - unless the (unreadable) global defaults
-    // config were consulted, which would switch activation to "prompt".
+    // the cwd, so auto-load fires - unless the (unreadable) global config
+    // file were consulted, which would switch activation to "prompt".
     const projDef = {
       name: "proj",
       version: 1,
@@ -599,7 +601,7 @@ test("project scope sees only the project source and ignores the global defaults
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
 
     // The project definition auto-loaded (built-in defaults apply, not the
-    // unreadable global config), and the global 'ghost' never surfaced -
+    // unreadable global config file), and the global 'ghost' never surfaced -
     // no collision or visibility of any kind.
     assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "proj" }]);
     assert.ok(

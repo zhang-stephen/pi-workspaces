@@ -13,10 +13,15 @@ import {
   addRoot,
   DEFAULT_PROJECT_ROOT_ASCEND,
   discoverProjectDir,
+  globalConfigFile,
   globalWorkspacesDir,
   loadAll,
+  loadGlobalConfig,
+  loadProjectConfig,
+  projectConfigFile,
   projectWorkspacesDir,
   removeRoot,
+  resolveConfig,
   saveDefinition,
   scanSource,
   toWorkspaceInfo,
@@ -54,20 +59,22 @@ test("scanSource keeps valid files and skips corrupt/bad-version ones with warni
   }
 });
 
-// D9 (simplified): no dedicated legacy-key detection - a stale 'primary'
-// field is silently not part of the schema, while legacy option keys fail
-// the generic unknown-option check and the file is skipped with a warning.
-test("scanSource tolerates a stale 'primary' field but skips legacy option keys", () => {
+// D9 (simplified): no dedicated legacy-key detection - the schema is
+// name/version/roots only, so a stale 'primary' field and the removed
+// 'options' object both fail the generic unknown-key check and the file is
+// skipped with a warning (silent at session_start per D1; visible here).
+test("scanSource skips definitions carrying unknown top-level keys, with a warning", () => {
   const dir = makeTempDir();
   try {
     writeFile(dir, "legacy-primary.json", JSON.stringify({ ...DEF, primary: "app" }));
-    writeFile(dir, "legacy-option.json", JSON.stringify({ ...DEF, options: { autoLoadInPrimary: true } }));
+    writeFile(dir, "legacy-options.json", JSON.stringify({ ...DEF, options: { activation: "prompt" } }));
 
     const { defs, warnings } = scanSource(dir, "project");
 
-    assert.deepEqual(defs, [DEF], "the 'primary' field is not part of the schema anymore");
-    assert.equal(warnings.length, 1);
-    assert.ok(warnings.some((w) => w.includes("legacy-option.json") && w.includes("'autoLoadInPrimary'")));
+    assert.deepEqual(defs, [], "no definition with unknown top-level keys loads");
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.some((w) => w.includes("legacy-primary.json") && w.includes("'primary'")));
+    assert.ok(warnings.some((w) => w.includes("legacy-options.json") && w.includes("'options'")));
   } finally {
     cleanup(dir);
   }
@@ -76,6 +83,66 @@ test("scanSource tolerates a stale 'primary' field but skips legacy option keys"
 test("scanSource of a missing directory yields empty results without warnings", () => {
   const dir = path.join(makeTempDir(), "does-not-exist");
   assert.deepEqual(scanSource(dir, "global"), { defs: [], warnings: [] });
+});
+
+// Flat plugin config (2026-09-19 spec, D4): builtin < global < project,
+// per key, tolerant reader; projectRootAscend is a global-only knob.
+test("loadGlobalConfig reads the flat file per key and tolerates any problem", () => {
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    // Missing file: every key unset.
+    assert.deepEqual(loadGlobalConfig(), {});
+    assert.equal(globalConfigFile(), path.join(agentDir, "pi-workspaces.json"));
+
+    writeFile(agentDir, "pi-workspaces.json", JSON.stringify({
+      activation: "prompt",
+      warnOnUnrelatedLoad: false,
+      projectRootAscend: 5,
+      unknownKey: "ignored",
+    }));
+    assert.deepEqual(loadGlobalConfig(), {
+      activation: "prompt",
+      warnOnUnrelatedLoad: false,
+      projectRootAscend: 5,
+    });
+
+    // Wrongly typed values degrade to "unset"; the legacy 'defaults'
+    // wrapper is just an unknown key now; a negative cap is not a cap.
+    writeFile(agentDir, "pi-workspaces.json", JSON.stringify({
+      defaults: { activation: "prompt" },
+      activation: "sometimes",
+      warnOnUnrelatedLoad: "yes",
+      projectRootAscend: -1,
+    }));
+    assert.deepEqual(loadGlobalConfig(), {});
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir);
+  }
+});
+
+test("loadProjectConfig reads <projectRoot>/.pi/pi-workspaces.json and never the ascend cap", () => {
+  const projectDir = makeTempDir("pi-workspaces-proj-");
+  try {
+    assert.deepEqual(loadProjectConfig(projectDir), {}, "a missing file yields an empty partial");
+
+    writeFile(projectDir, path.join(".pi", "pi-workspaces.json"), JSON.stringify({
+      activation: "prompt",
+      warnOnUnrelatedLoad: false,
+      projectRootAscend: 9,
+    }));
+    // The ascend cap is not even read at the project level (D4).
+    assert.deepEqual(loadProjectConfig(projectDir), {
+      activation: "prompt",
+      warnOnUnrelatedLoad: false,
+    });
+    assert.equal(projectConfigFile(projectDir), path.join(projectDir, ".pi", "pi-workspaces.json"));
+  } finally {
+    cleanup(projectDir);
+  }
 });
 
 test("discoverProjectDir stops at the nearest marker when starting in a subdirectory", () => {

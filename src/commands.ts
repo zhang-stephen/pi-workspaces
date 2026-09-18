@@ -18,9 +18,10 @@ import {
   globalWorkspacesDir,
   loadAll,
   loadGlobalConfig,
+  loadProjectConfig,
   NAME_PATTERN,
   removeRoot,
-  resolveOptions,
+  resolveConfig,
   saveDefinition,
   toWorkspaceInfo,
   type InstallScope,
@@ -345,7 +346,7 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
     notify(ctx, usage(deps.scope), "error");
     return;
   }
-  const { merged, collisions } = loadAll(ctx.cwd, deps.scope);
+  const { merged, collisions, projectRoot } = loadAll(ctx.cwd, deps.scope);
   const entry = merged.find((m) => m.def.name === name);
   if (!entry) {
     notify(ctx, `Workspace '${name}' not found. Run /workspace list to see available workspaces.`, "error");
@@ -355,10 +356,10 @@ async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, na
   deps.setActive(ws, ctx);
   // D7: loading a workspace whose roots do not contain the cwd proceeds,
   // but warns - bare relative paths stay anchored at the session directory.
-  // The global defaults config is only readable in global scope (D1).
-  const defaults = deps.scope === "global" ? loadGlobalConfig().options : {};
+  // The global config file is only readable in global scope (D1).
+  const config = resolveConfig(loadProjectConfig(projectRoot), deps.scope === "global" ? loadGlobalConfig() : {});
   if (
-    resolveOptions(entry.def, defaults).warnOnUnrelatedLoad &&
+    config.warnOnUnrelatedLoad &&
     !ws.roots.some((r) => isInside(r.path, ctx.cwd))
   ) {
     notify(
