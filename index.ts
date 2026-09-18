@@ -3,22 +3,33 @@
 // first-touch constraint injection, the footer statusline and (on UI
 // sessions) the @root autocomplete provider, and drives session activation
 // per design section 4:
-//   session_start -> loadAll -> notify warnings/collisions -> auto-load
-//   when the session cwd equals a workspace's primary root and
-//   autoLoadInPrimary resolves true -> journal restore (session resume)
-//   -> select prompt when ctx.hasUI: the containing workspaces only when
-//   the cwd sits in a non-primary root, otherwise every promptable one.
+//   session_start -> loadAll (sources depend on the install scope:
+//   global installs see global+project, anything else sees the project
+//   source only) -> notify warnings/collisions -> auto-load when the
+//   session cwd equals a workspace's primary root and autoLoadInPrimary
+//   resolves true -> journal restore (session resume) -> select prompt
+//   when ctx.hasUI and the cwd sits in some workspace's non-primary root.
+//   A cwd outside every root never prompts.
 // setActive is the single activation point: it owns the first-touch
 // tracker reset, the statusline refresh and the pi-workspaces:active
 // journal entry - nothing else writes the journal.
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createAutocompleteProvider } from "./src/autocomplete.ts";
 import { registerWorkspaceCommands } from "./src/commands.ts";
 import { isInside, type WorkspaceInfo } from "./src/path-resolver.ts";
 import { buildWorkspacePromptSection, FirstTouchTracker, makeConstraintReader } from "./src/prompt-inject.ts";
 import { refreshStatus } from "./src/statusline.ts";
 import { registerToolOverrides } from "./src/tools.ts";
-import { loadAll, loadGlobalConfig, resolveOptions, toWorkspaceInfo } from "./src/workspace-store.ts";
+import {
+  loadAll,
+  loadGlobalConfig,
+  resolveOptions,
+  toWorkspaceInfo,
+  type InstallScope,
+  type WorkspaceOptions,
+} from "./src/workspace-store.ts";
 
 /** Journal entry type: the active workspace name, recorded on every switch. */
 const JOURNAL_TYPE = "pi-workspaces:active";
@@ -39,6 +50,24 @@ function pathKey(p: string): string {
 
 function samePath(a: string, b: string): boolean {
   return pathKey(a) === pathKey(b);
+}
+
+/**
+ * Decide which definition sources this install may see from the extension
+ * file's own location. A global install (<agentDir>/extensions/) scans both
+ * sources and reads the global defaults config. Anything else - a project
+ * install under <cwd>/.pi/extensions/ or an explicit -e dev path - is
+ * project-scoped: only <cwd>/.pi/workspaces is visible and the global
+ * config files are never read or written. Detection failure defaults to
+ * the safe project scope.
+ */
+function detectInstallScope(): InstallScope {
+  try {
+    const self = fileURLToPath(import.meta.url);
+    return isInside(path.join(getAgentDir(), "extensions"), self) ? "global" : "project";
+  } catch {
+    return "project";
+  }
 }
 
 /**
@@ -68,7 +97,7 @@ function journaledActiveName(ctx: {
   return name;
 }
 
-export default function piWorkspaces(pi: ExtensionAPI): void {
+export default function piWorkspaces(pi: ExtensionAPI, scope: InstallScope = detectInstallScope()): void {
   // Runtime state. Tools and prompt rendering read both through getters so
   // they always observe the current values; sessionCwd is refreshed from
   // ctx.cwd on every session_start (never a captured value).
@@ -98,7 +127,7 @@ export default function piWorkspaces(pi: ExtensionAPI): void {
     sessionCwd: getSessionCwd,
     onFirstTouch: (root) => tracker.onTouch(root),
   });
-  registerWorkspaceCommands(pi, { getActive, setActive });
+  registerWorkspaceCommands(pi, { getActive, setActive, scope });
 
   pi.on("session_start", async (_event, ctx) => {
     sessionCwd = ctx.cwd;
@@ -109,10 +138,12 @@ export default function piWorkspaces(pi: ExtensionAPI): void {
       ctx.ui.addAutocompleteProvider(createAutocompleteProvider(getActive));
     }
 
-    const { merged, collisions, warnings } = loadAll(ctx.cwd);
+    const { merged, collisions, warnings } = loadAll(ctx.cwd, scope);
     // Global defaults flow through resolveOptions per definition; the
-    // sparse config object itself is never read key-by-key.
-    const globalDefaults = loadGlobalConfig();
+    // sparse config object itself is never read key-by-key. The global
+    // defaults config belongs to the global scope - a project-scoped
+    // install resolves options against the built-in defaults only.
+    const globalDefaults = scope === "global" ? loadGlobalConfig() : ({} as WorkspaceOptions);
     for (const warning of warnings) {
       ctx.ui.notify(warning, "warning");
     }
@@ -152,15 +183,17 @@ export default function piWorkspaces(pi: ExtensionAPI): void {
       }
     }
 
-    // 3. Ask: two layers. When the cwd sits inside some workspace's
-    //    non-primary root, offer only those containing workspaces;
-    //    otherwise offer every workspace whose promptInOtherDirs resolves
-    //    true. Always with a "Don't load" escape hatch.
-    const containing = merged.filter(({ def }) =>
-      def.roots.some((r) => r.name !== def.primary && isInside(r.path, ctx.cwd)),
+    // 3. Ask, but only when the cwd sits inside some workspace's
+    //    non-primary root: offer exactly those containing workspaces.
+    //    A cwd outside every root never prompts - an unrelated directory
+    //    must not be nagged just because definitions exist. The
+    //    promptInOtherDirs option gates this prompt per workspace, and
+    //    "Don't load" stays as the escape hatch.
+    const candidates = merged.filter(
+      ({ def }) =>
+        def.roots.some((r) => r.name !== def.primary && isInside(r.path, ctx.cwd)) &&
+        resolveOptions(def, globalDefaults).promptInOtherDirs,
     );
-    const pool = containing.length > 0 ? containing : merged;
-    const candidates = pool.filter(({ def }) => resolveOptions(def, globalDefaults).promptInOtherDirs);
     if (candidates.length > 0 && ctx.hasUI) {
       const names = candidates.map((c) => c.def.name);
       const choice = await ctx.ui.select("Load a workspace for this session?", [...names, "Don't load"]);

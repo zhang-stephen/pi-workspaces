@@ -140,6 +140,7 @@ test("unload clears the active workspace via setActive(null, ctx)", async () => 
         clearedWith = ws;
         clearedWithCtx = ctxArg;
       },
+      scope: "global",
     };
     const pi = mockPi();
     registerWorkspaceCommands(pi, deps);
@@ -201,6 +202,7 @@ test("add-root mutates the active workspace and persists the project JSON file",
         setCalls++;
         active = ws;
       },
+      scope: "project",
     });
     const { ctx, notes } = ctxCapturingNotify(cwd);
     const handler = workspaceCmd(pi);

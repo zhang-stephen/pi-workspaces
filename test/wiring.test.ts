@@ -58,7 +58,7 @@ test("factory registers the 7 tool overrides, the /workspace command and both ev
   const fx = isolatedFixture();
   try {
     const pi = mockPi();
-    factory(pi);
+    factory(pi, "global");
 
     for (const name of TOOL_NAMES) {
       assert.ok(pi.tools.has(name), `tool '${name}' must be registered`);
@@ -115,7 +115,7 @@ test("session_start auto-loads the workspace whose primary root is the session c
     writeFile(fx.cwd, path.join(".pi", "workspaces", "other.json"), JSON.stringify(otherDef));
 
     const pi = mockPi();
-    factory(pi);
+    factory(pi, "global");
     const { ctx, statuses, notes } = ctxCapturingUi(fx.cwd);
 
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
@@ -151,7 +151,7 @@ test("before_agent_start appends the workspace section only when a workspace is 
     writeFile(fx.agentDir, path.join("workspaces", "demo.json"), JSON.stringify(def));
 
     const pi = mockPi();
-    factory(pi);
+    factory(pi, "global");
     const { ctx } = ctxCapturingUi(fx.cwd);
     // The handler only reads type/systemPrompt; node:test strips types, so
     // the literal is pinned against the real event shape with a cast.
@@ -223,7 +223,7 @@ test("session_start select offers only the containing workspace when the cwd is 
     fs.mkdirSync(cwd);
 
     const pi = mockPi();
-    factory(pi);
+    factory(pi, "global");
     const selects: Array<{ message: string; items: string[] }> = [];
     const ctx = mockCtx(cwd, { hasUI: true });
     ctx.ui.select = async (message: string, items: string[]) => {
@@ -246,7 +246,7 @@ test("session_start select offers only the containing workspace when the cwd is 
   }
 });
 
-test("session_start select offers every promptable workspace when the cwd is outside all roots", async () => {
+test("session_start never prompts when the cwd is outside every workspace root", async () => {
   const fx = isolatedFixture();
   const alphaDir = makeTempDir("pi-workspaces-alpha-");
   const betaDir = makeTempDir("pi-workspaces-beta-");
@@ -267,7 +267,7 @@ test("session_start select offers every promptable workspace when the cwd is out
     writeFile(fx.agentDir, path.join("workspaces", "beta.json"), JSON.stringify(betaDef));
 
     const pi = mockPi();
-    factory(pi);
+    factory(pi, "global");
     const selects: Array<{ message: string; items: string[] }> = [];
     const ctx = mockCtx(fx.cwd, { hasUI: true });
     ctx.ui.select = async (message: string, items: string[]) => {
@@ -277,14 +277,61 @@ test("session_start select offers every promptable workspace when the cwd is out
 
     await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
 
-    // No workspace contains the cwd, so the prompt falls back to every
-    // promptable workspace (sorted source order) plus the escape hatch.
-    assert.deepEqual(selects, [
-      { message: "Load a workspace for this session?", items: ["alpha", "beta", "Don't load"] },
-    ]);
+    // Definitions exist and both resolve promptInOtherDirs: true, yet no
+    // workspace contains the cwd - the prompt must not fire. Loading from
+    // an unrelated directory is always an explicit /workspace load.
+    assert.deepEqual(selects, []);
     assert.equal(pi.entries.get("pi-workspaces:active"), undefined);
   } finally {
     cleanup(alphaDir, betaDir);
+    fx.restore();
+  }
+});
+
+test("project scope sees only the project source and ignores the global defaults config", async () => {
+  const fx = isolatedFixture();
+  const primaryDir = makeTempDir("pi-workspaces-primary-");
+  try {
+    // A global definition that must stay invisible in project scope, and a
+    // global defaults config that must not be read either.
+    const ghostDef = {
+      name: "ghost",
+      version: 1,
+      roots: [{ name: "g", path: primaryDir }],
+      primary: "g",
+    };
+    writeFile(fx.agentDir, path.join("workspaces", "ghost.json"), JSON.stringify(ghostDef));
+    writeFile(fx.agentDir, "pi-workspaces.json", JSON.stringify({ defaults: { autoLoadInPrimary: false } }));
+    // The project definition lives under <cwd>/.pi/workspaces; its cwd is
+    // the primary root, so auto-load fires - unless the (unreadable)
+    // global defaults config were consulted, which disables auto-load.
+    const projDef = {
+      name: "proj",
+      version: 1,
+      roots: [{ name: "app", path: fx.cwd }],
+      primary: "app",
+    };
+    writeFile(fx.cwd, path.join(".pi", "workspaces", "proj.json"), JSON.stringify(projDef));
+
+    const pi = mockPi();
+    factory(pi, "project");
+    const { ctx, notes } = ctxCapturingUi(fx.cwd);
+    await emit(pi.handlers, "session_start", { type: "session_start", reason: "startup" }, ctx);
+
+    // The project definition auto-loaded (built-in defaults apply, not the
+    // unreadable global config), and the global 'ghost' never surfaced -
+    // no collision or visibility of any kind.
+    assert.deepEqual(pi.entries.get("pi-workspaces:active"), [{ name: "proj" }]);
+    assert.ok(
+      notes.some(([msg]) => msg.includes("auto-loaded")),
+      "expected the auto-load notification",
+    );
+    assert.ok(
+      !notes.some(([msg]) => msg.includes("ghost")),
+      "the global definition must not leak into project scope",
+    );
+  } finally {
+    cleanup(primaryDir);
     fx.restore();
   }
 });

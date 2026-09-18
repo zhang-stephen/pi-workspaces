@@ -22,6 +22,7 @@ import {
   removeRoot,
   saveDefinition,
   toWorkspaceInfo,
+  type InstallScope,
   type LoadedDef,
   type RootDefinition,
   type WorkspaceDefinition,
@@ -31,17 +32,21 @@ import {
 export interface CommandDeps {
   getActive(): WorkspaceInfo | null;
   setActive(ws: WorkspaceInfo | null, ctx?: any): void;
+  /** Install scope: decides which definition sources are visible and where create persists. */
+  scope: InstallScope;
 }
 
-const USAGE = `Usage: /workspace [subcommand]
+function usage(scope: InstallScope): string {
+  return `Usage: /workspace [subcommand]
   (none)                  show active workspace status
   list                    list workspaces from global and project sources
   load <name>             activate a workspace
   unload                  deactivate the active workspace
   create <name>           create a workspace with the current directory as its
-                          sole primary root (saved to the global source)
+                          sole primary root (saved to the ${scope} source)
   add-root [name] <path>  add a root to the active workspace
   remove-root <name>      remove a root from the active workspace`;
+}
 
 /**
  * One root line shared by the format helpers: two-space indented
@@ -124,7 +129,7 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
           case "status":
             return showStatus(ctx, deps);
           case "list":
-            return showList(ctx);
+            return showList(ctx, deps);
           case "load":
             return await loadWorkspace(ctx, deps, rest[0]);
           case "unload":
@@ -136,7 +141,7 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
           case "remove-root":
             return await changeRoots(ctx, deps, rest, "remove");
           default:
-            return notify(ctx, USAGE, "error");
+            return notify(ctx, usage(deps.scope), "error");
         }
       } catch (err) {
         // Last-resort guard: store-level throws surface as notifications.
@@ -155,17 +160,17 @@ function showStatus(ctx: ExtensionCommandContext, deps: CommandDeps): void {
   notify(ctx, formatStatus(active));
 }
 
-function showList(ctx: ExtensionCommandContext): void {
-  const { merged } = loadAll(ctx.cwd);
+function showList(ctx: ExtensionCommandContext, deps: CommandDeps): void {
+  const { merged } = loadAll(ctx.cwd, deps.scope);
   notify(ctx, formatList(merged));
 }
 
 async function loadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, name: string | undefined): Promise<void> {
   if (name === undefined) {
-    notify(ctx, USAGE, "error");
+    notify(ctx, usage(deps.scope), "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd);
+  const { merged } = loadAll(ctx.cwd, deps.scope);
   const entry = merged.find((m) => m.def.name === name);
   if (!entry) {
     notify(ctx, `Workspace '${name}' not found. Run /workspace list to see available workspaces.`, "error");
@@ -190,14 +195,14 @@ function unloadWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps): void 
 
 async function createWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, name: string | undefined): Promise<void> {
   if (name === undefined) {
-    notify(ctx, USAGE, "error");
+    notify(ctx, usage(deps.scope), "error");
     return;
   }
   if (!NAME_PATTERN.test(name)) {
     notify(ctx, `Illegal workspace name: '${name}' (must match ${NAME_PATTERN.source})`, "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd);
+  const { merged } = loadAll(ctx.cwd, deps.scope);
   if (merged.some((m) => m.def.name === name)) {
     notify(ctx, `Workspace '${name}' already exists.`, "error");
     return;
@@ -211,8 +216,14 @@ async function createWorkspace(ctx: ExtensionCommandContext, deps: CommandDeps, 
     roots: [{ name: rootName, path: ctx.cwd }],
     primary: rootName,
   };
-  await saveDefinition(globalWorkspacesDir(), def);
-  const ws = toWorkspaceInfo(def, "global");
+  // The definition lands in the source matching the install scope: a
+  // global install persists globally, anything else (project install or
+  // -e dev load) stays inside the project and never touches the global
+  // config directory.
+  const origin = deps.scope;
+  const dir = origin === "project" ? projectWorkspacesDir(ctx.cwd) : globalWorkspacesDir();
+  await saveDefinition(dir, def);
+  const ws = toWorkspaceInfo(def, origin);
   deps.setActive(ws, ctx);
   notify(ctx, formatStatus(ws));
 }
@@ -234,14 +245,14 @@ async function changeRoots(
   let rootPath: string | undefined;
   if (op === "add") {
     if (rest.length < 1 || rest.length > 2) {
-      notify(ctx, USAGE, "error");
+      notify(ctx, usage(deps.scope), "error");
       return;
     }
     name = rest.length === 2 ? rest[0] : null;
     rootPath = rest[rest.length - 1];
   } else {
     if (rest.length !== 1) {
-      notify(ctx, USAGE, "error");
+      notify(ctx, usage(deps.scope), "error");
       return;
     }
     name = rest[0];
@@ -252,7 +263,7 @@ async function changeRoots(
     notify(ctx, "No workspace is active; use /workspace load or /workspace create first.", "error");
     return;
   }
-  const { merged } = loadAll(ctx.cwd);
+  const { merged } = loadAll(ctx.cwd, deps.scope);
   const entry = merged.find((m) => m.def.name === active.name);
   if (!entry) {
     notify(ctx, `Definition for active workspace '${active.name}' not found on disk; cannot persist changes.`, "error");

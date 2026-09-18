@@ -167,7 +167,7 @@ test("loadAll merges both sources with the project source winning per name", () 
     writeFile(cwd, path.join(".pi", "workspaces", "shared.json"), JSON.stringify(projectDef));
     writeFile(cwd, path.join(".pi", "workspaces", "project-only.json"), JSON.stringify(projectOnly));
 
-    const { merged, collisions, warnings } = loadAll(cwd);
+    const { merged, collisions, warnings } = loadAll(cwd, "global");
 
     assert.deepEqual(warnings, []);
     assert.deepEqual(collisions, ["shared"]);
@@ -185,6 +185,29 @@ test("loadAll merges both sources with the project source winning per name", () 
     // The project definition content replaced the global one (scanSource
     // normalizes, so compare by value, not identity).
     assert.deepEqual(merged.find((m) => m.def.name === "shared")?.def, projectDef);
+  } finally {
+    if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = prev;
+    cleanup(agentDir, cwd);
+  }
+});
+
+test("loadAll in project scope scans only the project source", () => {
+  const agentDir = makeTempDir("pi-workspaces-agent-");
+  const cwd = makeTempDir("pi-workspaces-cwd-");
+  const prev = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    writeFile(agentDir, path.join("workspaces", "global-only.json"), JSON.stringify({ ...DEF, name: "global-only" }));
+    writeFile(cwd, path.join(".pi", "workspaces", "proj.json"), JSON.stringify({ ...DEF, name: "proj" }));
+
+    const { merged, collisions, warnings } = loadAll(cwd, "project");
+
+    // The global definition stays invisible: no merge, no collision, and
+    // no warning can reference it.
+    assert.deepEqual(merged.map((m) => [m.def.name, m.origin] as const), [["proj", "project"]]);
+    assert.deepEqual(collisions, []);
+    assert.deepEqual(warnings, []);
   } finally {
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prev;

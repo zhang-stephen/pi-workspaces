@@ -21,6 +21,16 @@ export interface WorkspaceDefinition {
 }
 export interface LoadedDef { def: WorkspaceDefinition; origin: "global" | "project" }
 
+/**
+ * Install scope, detected from the extension file's own location (index.ts):
+ * a global install under <agentDir>/extensions/ scans both definition
+ * sources and reads the global defaults config; anything else (a project
+ * install under <cwd>/.pi/extensions/, or an explicit -e dev path) is
+ * project-scoped and only ever sees <cwd>/.pi/workspaces - global config
+ * files are neither read nor written.
+ */
+export type InstallScope = "global" | "project";
+
 // Fallback of last resort for the options chain (workspace ?? defaults ?? builtin).
 export const BUILTIN_DEFAULTS: WorkspaceOptions = {
   autoLoadInPrimary: true,
@@ -218,14 +228,23 @@ export function scanSource(
 }
 
 /**
- * Load and merge both definition sources for a session: global definitions
- * first, project definitions merged per name on top (project wins).
- * Warnings from both scans are concatenated; name collisions are reported
- * so callers can notify the user that the project copy overrode the global.
+ * Load the definition sources visible to the given install scope. Global
+ * scope scans both sources and merges per name (project wins); warnings
+ * from both scans are concatenated and name collisions are reported so
+ * callers can notify the user that the project copy overrode the global.
+ * Project scope scans only the project source (<cwd>/.pi/workspaces), so
+ * collisions are impossible and the global directory is never touched.
  */
-export function loadAll(cwd: string): { merged: LoadedDef[]; collisions: string[]; warnings: string[] } {
-  const globalScan = scanSource(globalWorkspacesDir(), "global");
+export function loadAll(cwd: string, scope: InstallScope): { merged: LoadedDef[]; collisions: string[]; warnings: string[] } {
   const projectScan = scanSource(projectWorkspacesDir(cwd), "project");
+  if (scope === "project") {
+    return {
+      merged: projectScan.defs.map((def) => ({ def, origin: "project" as const })),
+      collisions: [],
+      warnings: projectScan.warnings,
+    };
+  }
+  const globalScan = scanSource(globalWorkspacesDir(), "global");
   const { merged, collisions } = mergeByName(globalScan.defs, projectScan.defs);
   return { merged, collisions, warnings: [...globalScan.warnings, ...projectScan.warnings] };
 }

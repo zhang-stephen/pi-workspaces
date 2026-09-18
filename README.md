@@ -41,6 +41,18 @@ Loads only for sessions started inside that repository. Suitable for team-shared
 > **WARNING: never install in both locations at once.**
 > pi auto-discovers both directories and loads **two instances** of the extension. The seven tool overrides then double-register (`bash`, `read`, `write`, ...), which breaks tool dispatch and rendering. Pick exactly one location per machine-and-repo setup; if you ever migrate, delete the other copy first.
 
+### Install scope decides what you can see
+
+The extension detects how it was loaded and scopes all config access accordingly:
+
+| How it was loaded | Definition sources | Global defaults config | `/workspace create` writes to |
+|---|---|---|---|
+| Global install (`~/.pi/agent/extensions/`) | global + project (merged by name) | read | global source |
+| Project install (`<repo>/.pi/extensions/`) | project only | never read | project source |
+| `pi -e <path>` (dev loop) | project only | never read | project source |
+
+A project-scoped load never reads or writes anything under `~/.pi/agent/` - not the workspace definitions, not the defaults config. Your personal global workspaces stay invisible to a repo-shared extension install, and the development loop (`pi -e ...`) behaves the same way. To develop against global definitions, install the extension globally for real.
+
 ## Quick start
 
 ```text
@@ -55,8 +67,8 @@ Or hand-write a definition file (see the schema below) into `~/.pi/agent/workspa
 
 Definitions are JSON files, one workspace per file:
 
-- Global source: `~/.pi/agent/workspaces/<name>.json`
-- Project source: `<repo>/.pi/workspaces/<name>.json`
+- Global source: `~/.pi/agent/workspaces/<name>.json` (visible to global installs only)
+- Project source: `<repo>/.pi/workspaces/<name>.json` (visible to every install scope)
 
 ### Schema
 
@@ -106,7 +118,7 @@ workspace.options.<key>  ??  global defaults.<key>  ??  built-in default
 Built-in defaults: `autoLoadInPrimary: true`, `promptInOtherDirs: true`.
 
 - `autoLoadInPrimary`: when the session starts inside a workspace's primary root, load that workspace without asking.
-- `promptInOtherDirs`: when the session starts anywhere else, offer this workspace in the load prompt.
+- `promptInOtherDirs`: when the session starts inside one of this workspace's *non-primary* roots, offer this workspace in the load prompt. Sessions started outside every root never prompt, no matter what.
 
 ## Path syntax and bash cwd
 
@@ -128,11 +140,11 @@ Resolution failures are thrown as tool errors the model can see and self-correct
 
 ## How workspaces activate
 
-At `session_start` the extension scans both definition sources and then:
+At `session_start` the extension scans the definition sources visible to its install scope and then:
 
 1. **Auto-load**: if the session directory equals a workspace's primary root and its `autoLoadInPrimary` resolves true, that workspace loads immediately.
 2. **Journal restore**: if the session is a `/resume`, the last recorded active workspace is re-activated.
-3. **Ask**: otherwise, if any definition exists and the session has a UI, pi prompts with a select list plus a "Don't load" escape hatch. The list has two layers: when the session directory sits inside some workspace's *non-primary* root, only those containing workspaces are offered; otherwise every workspace whose `promptInOtherDirs` resolves true is offered.
+3. **Ask**: otherwise, if the session directory sits inside some workspace's *non-primary* root and that workspace's `promptInOtherDirs` resolves true, pi prompts with those containing workspaces plus a "Don't load" escape hatch. A session started outside every workspace root is **never** prompted - loading from an unrelated directory is always an explicit `/workspace load`.
 
 Only one workspace can be active at a time; loading another replaces the current one (with a notification).
 
@@ -146,7 +158,7 @@ All commands are `/workspace` subcommands; output is shown via pi notifications.
 | `/workspace list` | List all definitions from both sources, each with its `origin` (`global` or `project`) and primary root. |
 | `/workspace load <name>` | Activate a workspace by name. |
 | `/workspace unload` | Deactivate the active workspace; the statusline clears. |
-| `/workspace create <name>` | Create a definition in the **global** source with the current directory as its sole primary root, and activate it. |
+| `/workspace create <name>` | Create a definition with the current directory as its sole primary root, and activate it. Saved to the source matching the install scope (global installs: global source; everything else: project source). |
 | `/workspace add-root [name] <path>` | Add a root to the active workspace. The name is optional (derived from the directory basename when omitted); a relative path anchors at the session directory. The definition is persisted back to its origin source. |
 | `/workspace remove-root <name>` | Remove a root from the active workspace and persist. The primary root cannot be removed. |
 
@@ -163,22 +175,25 @@ All commands work headless, which is also how this extension is smoke-tested. Tw
 
 ## How definitions merge
 
-Both sources are scanned at `session_start` and merged **by name**: a project definition overrides a global definition of the same name, and the project source wins per name. A wholesale override never happens - a project file cannot hide your unrelated global workspaces; they keep loading side by side.
+A global install scans both sources at `session_start` and merges **by name**: a project definition overrides a global definition of the same name, and the project source wins per name. A wholesale override never happens - a project file cannot hide your unrelated global workspaces; they keep loading side by side. Project-scoped installs (project install or `-e` dev load) see only the project source, so no merging applies to them.
 
 - Each merged definition records its `origin` (`global` or `project`), shown by `/workspace list` and `/workspace status`.
 - A name collision triggers a one-time-per-session warning: "workspace 'X' from project overrides global".
 
-## Project-level install caveat
+## Project-level install caveats
 
-A project-level install loads only when the session starts inside that repository. Sessions started in any other directory never load the extension, so auto-load, prompts, tool overrides, and the statusline are all absent there - including sessions that start inside another root of the same workspace. This is expected behavior, not a bug: pi discovers project extensions from the session's own directory. Use a global install if you want the extension everywhere.
+A project-level install has two consequences, both expected behavior rather than bugs:
+
+- **Discovery**: pi discovers project extensions from the session's own directory, so the extension loads only when the session starts inside that repository. Sessions started elsewhere - including inside another root of the same workspace - have no auto-load, prompts, tool overrides, or statusline. Use a global install if you want the extension everywhere.
+- **Isolation**: a project-level install (like an `-e` dev load) is project-scoped: it sees only `<repo>/.pi/workspaces/` and never reads or writes the global config under `~/.pi/agent/`. A repo-shared extension cannot peek at your personal workspaces.
 
 ## Storage locations
 
 | What | Where |
 |------|-------|
-| Global definitions | `~/.pi/agent/workspaces/*.json` |
-| Project definitions | `<repo>/.pi/workspaces/*.json` |
-| Global default options | `~/.pi/agent/pi-workspaces.json` |
+| Global definitions | `~/.pi/agent/workspaces/*.json` (global installs only) |
+| Project definitions | `<repo>/.pi/workspaces/*.json` (all install scopes) |
+| Global default options | `~/.pi/agent/pi-workspaces.json` (global installs only) |
 | Active-workspace journal | inside the pi session file (custom entry `pi-workspaces:active`) |
 
 ## Known limitations

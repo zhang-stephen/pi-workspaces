@@ -59,6 +59,8 @@ Root name assignment (in priority order): explicit `name` in the definition file
 
 pi has no unified extension settings API; its `settings.json` schema is owned by pi core with no extension namespace. Following the official `preset.ts` example, the extension manages its own JSON files, locating the global directory via `getAgentDir()`.
 
+**Install scope gates access to these layers.** The extension detects its own file location: a global install under `<agentDir>/extensions/` may use all three layers; anything else - a project install under `<cwd>/.pi/extensions/` or an explicit `-e` dev path - is project-scoped and touches only `<cwd>/.pi/workspaces/` plus the session journal. The global definition directory and the global default config are neither read nor written in project scope. Rationale: a repo-shared extension must not peek at (or mutate) the user's personal workspaces.
+
 ### 3.2 Workspace definition schema
 
 ```json
@@ -102,7 +104,7 @@ Built-in defaults: `autoLoadInPrimary: true`, `promptInOtherDirs: true`.
 
 ### 3.3 Dual-source loading (merge rule)
 
-At `session_start` the store scans **both** sources and merges **by name, project source wins** — the official pi convention (core skills/agents/themes and the `preset.ts` example all override per name, never wholesale). Full override is explicitly rejected: a project definition must not hide the user's unrelated global workspaces.
+At `session_start` a global-scope install scans **both** sources and merges **by name, project source wins** — the official pi convention (core skills/agents/themes and the `preset.ts` example all override per name, never wholesale). Full override is explicitly rejected: a project definition must not hide the user's unrelated global workspaces. Project-scope installs scan only the project source, so no merging applies to them.
 
 - Each merged definition records `origin: "global" | "project"`, shown in `/workspace list`
 - A name collision triggers a `notify` ("workspace 'X' from project overrides global") once per session
@@ -119,13 +121,13 @@ At `session_start` the store scans **both** sources and merges **by name, projec
 
 On `session_start`:
 
-1. Scan both sources (§3.3)
+1. Scan the visible sources (§3.3)
 2. If `ctx.cwd` equals a workspace's primary root path → auto-load it when `autoLoadInPrimary` resolves to true
-3. Else if `promptInOtherDirs` resolves to true and any workspace contains `ctx.cwd` as a non-primary root (or no workspace matches at all but definitions exist) → `ctx.ui.select` offering the matching workspaces plus "Don't load"
+3. Else if `ctx.cwd` sits inside some workspace's *non-primary* root and that workspace's `promptInOtherDirs` resolves to true → `ctx.ui.select` offering exactly those containing workspaces plus "Don't load". A session started outside every workspace root is never prompted - loading from an unrelated directory is always an explicit `/workspace load`
 4. The active workspace name is persisted via `pi.appendEntry()` so `/resume` restores it
 5. `/workspace load <name>` manually activates a workspace at any time; `/workspace unload` deactivates
 
-**Project-level installation caveat**: if the extension is installed under `<primary-repo>/.pi/extensions/`, pi only discovers it when the session starts inside that repo. Step 3 is then unreachable in other directories — the extension simply is not loaded there. This is expected and documented in the README, not an error.
+**Project-level installation caveat**: if the extension is installed under `<primary-repo>/.pi/extensions/`, pi only discovers it when the session starts inside that repo, and the install is project-scoped (§3.1) - global definitions stay invisible. This is expected and documented in the README, not an error.
 
 Only one workspace may be active at a time. Loading another replaces the current one (with a notify).
 
