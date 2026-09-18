@@ -283,12 +283,11 @@ function errorMessage(err: unknown): string {
  */
 export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
   pi.registerCommand("workspace", {
-    // Attribution is part of the description on purpose (16.2, verified
-    // against pi's dist): the palette's source tag only prefixes a scope
-    // letter ([u]/[p]/[t]) for directory installs - the extension name is
-    // rendered only for npm/git package sources ([u:npm:...]).
+    // No in-description attribution (16.2): the palette's source tag shows
+    // [u:npm:pi-workspaces] once published; directory installs show only a
+    // bare scope letter either way.
     description:
-      "pi-workspaces: manage multi-root workspaces (status, list, load, unload, create, add, remove)",
+      "Manage multi-root workspaces (status, list, load, unload, create, add, remove)",
     getArgumentCompletions: (argumentPrefix: string) => completeWorkspaceArgs(argumentPrefix, deps),
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
       const tokens = args

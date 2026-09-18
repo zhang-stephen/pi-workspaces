@@ -40,6 +40,14 @@ function workspaceCmd(pi: ReturnType<typeof mockPi>): (args: string, ctx: unknow
   return cmd.handler as (args: string, ctx: unknown) => Promise<void>;
 }
 
+test("the command description carries no in-description attribution (16.2)", () => {
+  const pi = mockPi();
+  registerWorkspaceCommands(pi, { getActive: () => null, setActive: () => {}, scope: "project", getCwd: () => "" });
+  const cmd = pi.commands.get("workspace");
+  assert.ok(cmd);
+  assert.ok(!cmd.description?.includes("pi-workspaces"), "the npm palette tag carries the attribution");
+});
+
 test("argument completion offers subcommands, trailing space for arg-taking ones", async () => {
   const cwd = makeTempDir("pi-workspaces-cwd-");
   try {
