@@ -235,11 +235,24 @@ test("add-root mutates the active workspace and persists the project JSON file",
     );
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).roots, [{ name: "app", path: appDir }]);
 
+    // The short aliases dispatch through the same flow.
+    await handler(`add ${docsDir}`, ctx);
+    assert.deepEqual(
+      active.roots.map((r) => r.name),
+      ["app", "docs"],
+    );
+    await handler("remove docs", ctx);
+    assert.deepEqual(
+      active.roots.map((r) => r.name),
+      ["app"],
+    );
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).roots, [{ name: "app", path: appDir }]);
+
     // Removing the primary root is refused and nothing is persisted.
     await handler("remove-root app", ctx);
     assert.ok(notes.some(([msg, level]) => /primary/i.test(msg) && level === "error"));
     assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")).roots, [{ name: "app", path: appDir }]);
-    assert.equal(setCalls, 2); // add-root + remove-root only; the refused one did not activate
+    assert.equal(setCalls, 4); // two add + two remove; the refused one did not activate
   } finally {
     if (prev === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = prev;

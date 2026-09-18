@@ -44,8 +44,8 @@ function usage(scope: InstallScope): string {
   unload                  deactivate the active workspace
   create <name>           create a workspace with the current directory as its
                           sole primary root (saved to the ${scope} source)
-  add-root [name] <path>  add a root to the active workspace
-  remove-root <name>      remove a root from the active workspace`;
+  add [name] <path>       add a root to the active workspace (alias: add-root)
+  remove <name>           remove a root from the active workspace (alias: remove-root)`;
 }
 
 /**
@@ -114,8 +114,11 @@ function errorMessage(err: unknown): string {
  */
 export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
   pi.registerCommand("workspace", {
+    // Attribution is part of the description on purpose: pi's palette only
+    // prefixes a scope letter ([u]/[p]/[t]) for directory installs - the
+    // plugin name is rendered only for npm packages ([u:npm:...]).
     description:
-      "Manage multi-root workspaces: status, list, load, unload, create, add-root, remove-root",
+      "pi-workspaces: manage multi-root workspaces (status, list, load, unload, create, add, remove)",
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
       const tokens = args
         .trim()
@@ -137,8 +140,10 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
           case "create":
             return await createWorkspace(ctx, deps, rest[0]);
           case "add-root":
+          case "add":
             return await changeRoots(ctx, deps, rest, "add");
           case "remove-root":
+          case "remove":
             return await changeRoots(ctx, deps, rest, "remove");
           default:
             return notify(ctx, usage(deps.scope), "error");

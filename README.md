@@ -159,8 +159,8 @@ All commands are `/workspace` subcommands; output is shown via pi notifications.
 | `/workspace load <name>` | Activate a workspace by name. |
 | `/workspace unload` | Deactivate the active workspace; the statusline clears. |
 | `/workspace create <name>` | Create a definition with the current directory as its sole primary root, and activate it. Saved to the source matching the install scope (global installs: global source; everything else: project source). |
-| `/workspace add-root [name] <path>` | Add a root to the active workspace. The name is optional (derived from the directory basename when omitted); a relative path anchors at the session directory. The definition is persisted back to its origin source. |
-| `/workspace remove-root <name>` | Remove a root from the active workspace and persist. The primary root cannot be removed. |
+| `/workspace add [name] <path>` | Add a root to the active workspace (alias: `add-root`). The name is optional (derived from the directory basename when omitted); a relative path anchors at the session directory. The definition is persisted back to its origin source. |
+| `/workspace remove <name>` | Remove a root from the active workspace and persist (alias: `remove-root`). The primary root cannot be removed. |
 
 Interactive argument pickers (for example a fuzzy `load` picker) are post-MVP - missing arguments print usage text instead.
 
