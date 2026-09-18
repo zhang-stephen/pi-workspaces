@@ -12,7 +12,7 @@ When no workspace is active the extension does nothing at all: every tool behave
 - **Cross-root shell.** The `bash` tool gains an optional `cwd` parameter that accepts an absolute path or `@root-name/sub/dir`, spawning the command inside that root. Per-call cwd is safe because pi spawns a fresh shell process per call.
 - **Prompt injection.** While a workspace is active, a workspace section (root map, syntax rules, bash usage, constraint policy) is appended to the system prompt. The first time a root is touched in a session, that root's AGENTS.md / CLAUDE.md is appended to the tool result (once per root per session); roots without their own constraint files fall back to the session root's (the root containing the session directory), and reading a constraint file itself never double-injects it.
 - **Editor completion.** Typing `@` offers root switchers plus the files of the current root (the one containing your session directory) - select a root to drill into it, or keep typing a path without naming a root; every accepted item inserts the explicit `@root-name/path` form. `/workspace` also completes its arguments: subcommands, workspace names for `load` (minus the active one), root names for `remove`, and filesystem paths for `add`. Everything else delegates to pi's built-in completion. (Completion only helps paths you type - the model generates tool-call paths on its own.)
-- **Footer statusline.** A keyed footer entry shows the active workspace at a glance: `[ws] my-workspace (3 roots)`. When a root directory is missing on disk the status degrades: `[ws] my-workspace (2/3 roots) ! frontend missing`. The entry is cleared when no workspace is active.
+- **Footer statusline.** A keyed footer entry shows the active workspace at a glance: `[ws] <workspace> (3 roots)`. When a root directory is missing on disk the status degrades: `[ws] <workspace> (2/3 roots) ! <root>missing`. The entry is cleared when no workspace is active.
 - **Durable session state.** The active workspace is journaled into the session file, so `/resume` restores it.
 - **Headless-friendly.** All `/workspace` commands work in RPC mode, where interactive notifications are emitted as JSON events - usable for scripting and automated smoke tests.
 
@@ -38,7 +38,7 @@ Loads only for sessions started inside that repository. Suitable for team-shared
 
 **Trust note.** Project-local `.pi/extensions` entries load only after the project is trusted. pi resolves trust from saved `trust.json` decisions first, then its `defaultProjectTrust` setting decides whether it asks, trusts, or declines. Until the project is trusted the extension simply is not loaded.
 
-> **WARNING: never install in both locations at once.**
+> [!WARNING] Never install in both locations at once!
 > pi auto-discovers both directories and loads **two instances** of the extension. The seven tool overrides then double-register (`bash`, `read`, `write`, ...), which breaks tool dispatch and rendering. Pick exactly one location per machine-and-repo setup; if you ever migrate, delete the other copy first.
 
 ### Install scope decides what you can see
@@ -197,6 +197,8 @@ A project-level install has two consequences, both expected behavior rather than
 | Active-workspace journal | inside the pi session file (custom entry `pi-workspaces:active`) |
 
 ## Known limitations
+
+- **pi-fff conflict.** With `@ff-labs/pi-fff` (or any fork carrying its mention provider) in its default `tools-and-ui` mode, its own @ fuzzy search answers every `@` query and pi-workspaces' root completion never surfaces. Switch pi-fff to its `tools-only` mode (`/fff-mode tools-only`) to restore pi-workspaces' @ completion.
 
 - **Explicit `cwd` drops session env vars.** A `bash` call with an explicit `cwd` runs without the `PI_*` session environment variables (passing the runtime ctx through would override the resolved directory). Calls without `cwd` - the default branch - do inject them.
 - **Symlinked definition files are skipped.** The source scan only accepts regular `.json` files, so a workspace definition that is a symbolic link is silently ignored (use a real file or a link to the directory).
