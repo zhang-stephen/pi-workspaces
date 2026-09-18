@@ -248,18 +248,28 @@ Post-MVP: `/workspace config` (edit global defaults), create wizard, `/workspace
 
 ---
 
-## 9. Editor Autocomplete
+## 9. Editor Completion
 
-A provider registered via `ctx.ui.addAutocompleteProvider()` stacked on top of pi's built-in completion:
+Two completion surfaces, both active on UI sessions only (redesigned 2026-09-19, spec `2026-09-19-autocomplete-redesign-design.md`):
 
-- Typing `@` offers root-name completions (`@backend`, `@frontend`, ...)
-- After `@root-name/`, completes file/directory paths inside that root, matching built-in path-completion UX
-- Anything not matching the `@root` pattern delegates to the built-in provider unchanged
-- `applyCompletion` delegates to the built-in provider
+**@ path completion** (provider via `ctx.ui.addAutocompleteProvider`, stacked on pi's built-in):
 
-Performance guards: cap result count, skip `node_modules`/`.git`, respect `.gitignore` (reuse pi's walker utilities if exported).
+- Typing `@` offers root switchers (bare `name/` labels, absolute-path descriptions) plus the entries of the **current root** (the root containing the session cwd; absent when the cwd is inside no root)
+- Selecting a switcher inserts `@name/` and drills into that root with plain one-level path-prefix completion
+- A token whose first segment is not a root name completes as a path inside the current root (`@tex/ch` -> `@rootname/tex/chap4.tex`)
+- Explicit `@root-name/...` drill-down is unchanged; unknown roots yield no candidates (the popup hides) rather than fuzzy file matches
+- Labels never carry `@` (display only); every accepted item inserts the explicit `@rootname/relative/path` form (pi replaces the typed prefix with the item's value)
+- Anything not matching the @ pattern (including quoted file attachments) delegates to the built-in provider unchanged
 
-Note: this only affects paths the **user** types into the prompt editor. The model generates tool-call paths directly and needs no completion.
+**/workspace argument completion** (`getArgumentCompletions`; pi replaces the whole argument text with the chosen item's value):
+
+- First argument completes subcommand names; arg-taking subcommands complete with a trailing space so completion continues
+- `load` offers the visible definitions minus the active one (project items described as `project`, global items with their absolute definition-file path); project-scoped installs never see globals
+- `remove` offers the active workspace's root names; `add` completes filesystem paths for its path argument (relative paths anchor at the session cwd)
+
+Performance guards: results capped, `node_modules`/`.git` skipped in @ completion, one directory level per listing (no tree walks).
+
+Note: completion only affects paths the **user** types into the prompt editor or command line. The model generates tool-call paths directly and needs no completion.
 
 ---
 
@@ -347,7 +357,7 @@ Dependency direction: `index.ts` → modules → (`workspace-store`, `path-resol
 
 User feedback and dry-run discoveries, recorded for future iterations.
 
-### 16.1 Autocomplete vision (partially implemented)
+### 16.1 Autocomplete vision (SUPERSEDED 2026-09-19 by the autocomplete-redesign spec - the shipped model is switchers + implicit current root, not a merged pinned list)
 
 Current state (§9): typing `@` with an active workspace shows **only** root names (the built-in file completion is suppressed for `@` tokens); after `@root/` only that root's entries appear. The user's target design:
 
