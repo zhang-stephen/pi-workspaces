@@ -328,3 +328,32 @@ test/                    # node:test suites per §12
 ```
 
 Dependency direction: `index.ts` → modules → (`workspace-store`, `path-resolver`). Modules never import each other cyclically; `tools`/`commands`/`prompt-inject`/`statusline` depend on store + resolver only.
+
+---
+
+## 16. Recorded Ideas & Known Issues (2026-09-18)
+
+User feedback and dry-run discoveries, recorded for future iterations.
+
+### 16.1 Autocomplete vision (partially implemented)
+
+Current state (§9): typing `@` with an active workspace shows **only** root names (the built-in file completion is suppressed for `@` tokens); after `@root/` only that root's entries appear. The user's target design:
+
+1. When a workspace is active, typing `@` should show the other roots **pinned above the current directory's file completions** (merged list, not root-names-only), each root annotated with a description like `[root]: <abs path>`.
+2. After a root is selected, the suggestion list refreshes to show only candidates under that root. (Already the current stage-2 behavior.)
+
+### 16.2 Command palette source attribution
+
+In the `/` command list, commands from other sources carry an origin tag (e.g. `[u:npm:pi-markdown-preview]`). The `workspace` command should similarly identify pi-workspaces as its source. Open question: whether pi's `registerCommand` supports a source field or the description must carry the tag.
+
+### 16.3 Command alias: add / remove
+
+`add-root` / `remove-root` should be reachable as the shorter `add` / `remove` (alias or rename; keeping the long forms as aliases preserves muscle memory and docs).
+
+### 16.4 Known issue: constraint self-injection duplicates content
+
+Reproduced in session `01a0b551-0e4a-727a-b466-44c4a7dedf6f`: `read @yolo/AGENTS.md` returned the file's content twice — once as the first-touch constraint block (which *is* that file's content), once as the file body. The model flagged the duplication itself. Fix: when the resolved target file is the very constraint file about to be injected, skip the injection block.
+
+### 16.5 Known issue: journal entries duplicate on repeated session_start
+
+Same session: five consecutive `pi-workspaces:active` entries with identical data, caused by `session_start` re-firing (extension reloads while testing) and each firing appending unconditionally. Fix: make `setActive` idempotent at the journal level — skip `appendEntry` when the last journaled name already equals the new one.
