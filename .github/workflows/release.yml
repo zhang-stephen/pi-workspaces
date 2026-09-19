@@ -1,0 +1,40 @@
+name: Release
+
+on:
+  push:
+    branches: [master]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          release-type: node
+
+  publish:
+    needs: release
+    if: ${{ needs.release.outputs.release_created }}
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      id-token: write # OIDC required
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - run: npm test # UT again
+      - run: npm publish --access public
