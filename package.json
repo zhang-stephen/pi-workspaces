@@ -1,18 +1,49 @@
 {
   "name": "pi-workspaces",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Multi-root workspace extension for the pi coding agent",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "author": "Stephen Zhang",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "workspace",
+    "multi-root"
+  ],
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "README_zh.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhang-stephen/pi-workspaces.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
   "engines": {
-    "node": ">=25"
+    "node": ">=22.19.0"
   },
   "scripts": {
-    "test": "node --test test/**/*.ts"
+    "test": "node --test \"test/**/*.ts\""
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "^0.85.1",
-    "@types/node": "^25.0.0",
+    "@types/node": "^22.20.4",
     "typebox": "^1.3.7",
     "typescript": "^5.9.3"
   }

@@ -11,3 +11,6 @@ dist/
 .agent/
 .claude/
 .vscode/
+
+# npm packed tarballs
+*.tgz
