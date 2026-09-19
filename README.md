@@ -6,40 +6,51 @@ Multi-root workspaces for the [pi coding agent](https://pi.dev). A workspace mer
 
 When no workspace is active the extension does nothing at all: every tool behaves exactly like stock pi.
 
-## Feature tour
+## Features
 
-- **Multi-root file tools.** The built-in `read`, `write`, `edit`, `grep`, `find`, and `ls` tools gain a `@root-name/` path prefix that routes the call into any workspace root. Everything else about the tools (rendering, write serialization, result shape) is inherited from the built-ins.
-- **Cross-root shell.** The `bash` tool gains an optional `cwd` parameter that accepts an absolute path or `@root-name/sub/dir`, spawning the command inside that root. Per-call cwd is safe because pi spawns a fresh shell process per call.
-- **Prompt injection.** While a workspace is active, a workspace section (root map, syntax rules, bash usage, constraint policy) is appended to the system prompt. The first time a root is touched in a session, that root's AGENTS.md / CLAUDE.md is appended to the tool result (once per root per session); roots without their own constraint files fall back to the session root's (the root containing the session directory), and reading a constraint file itself never double-injects it.
-- **Editor completion.** Typing `@` offers root switchers plus the files of the current root (the one containing your session directory) - select a root to drill into it, or keep typing a path without naming a root; every accepted item inserts the explicit `@root-name/path` form. `/workspace` also completes its arguments: subcommands, workspace names for `load` (minus the active one), root names for `remove`, and filesystem paths for `add`. Everything else delegates to pi's built-in completion. (Completion only helps paths you type - the model generates tool-call paths on its own.)
-- **Footer statusline.** A keyed footer entry shows the active workspace at a glance: `[ws] <workspace> (3 roots)`. When a root directory is missing on disk the status degrades: `[ws] <workspace> (2/3 roots) ! <root>missing`. The entry is cleared when no workspace is active.
-- **Durable session state.** The active workspace is journaled into the session file, so `/resume` restores it.
-- **Headless-friendly.** All `/workspace` commands work in RPC mode, where interactive notifications are emitted as JSON events - usable for scripting and automated smoke tests.
+- **Multi-root file tools** - `read`, `write`, `edit`, `grep`, `find`, and `ls` accept a `@root-name/` path prefix that routes the call into any workspace root; result shape and rendering stay identical to the built-ins.
+- **Cross-root shell** - `bash` gains an optional `cwd` that accepts `@root-name/sub/dir` and spawns the command inside that root (safe: pi spawns a fresh shell per call).
+- **Prompt injection** - while a workspace is active, a workspace section (root map, syntax rules) is appended to the system prompt, and each root's AGENTS.md / CLAUDE.md is injected once on first touch, falling back to the session root's file.
+- **Editor completion** - typing `@` offers root switchers plus current-root files; `/workspace` completes its subcommands, workspace and root names, and paths.
+- **Footer statusline** - `[ws] <workspace> (3 roots)`, degrading to `[ws] <workspace> (2/3 roots) ! <root>missing` when a root is missing on disk.
+- **Durable session state** - the active workspace is journaled, so `/resume` restores it.
+- **Headless-friendly** - all `/workspace` commands work in RPC mode, emitting notifications as JSON events for scripting.
 
 ## Installation
 
-The extension is a TypeScript directory loaded directly by pi (no build step). Copy the whole directory - `index.ts` plus `src/` - into exactly one of the two auto-discovered locations:
+The extension is plain TypeScript loaded directly by pi (no build step) and installs like any other pi package.
 
 ### Global (personal, cross-project)
 
-```
-~/.pi/agent/extensions/pi-workspaces/index.ts
+```bash
+pi install npm:pi-workspaces
+# or pinned to a git ref
+pi install git:github.com/zhang-stephen/pi-workspaces@v0.1.0
 ```
 
 Loads in every session, no matter which directory it starts in. Best for your own machine and personal workspaces.
 
 ### Project-level (bound to one repository)
 
+```bash
+pi install -l npm:pi-workspaces
 ```
-<repo>/.pi/extensions/pi-workspaces/index.ts
+
+Writes the dependency to the repository's `.pi/settings.json`, so it travels with the repo: pi installs it automatically on startup once the project is trusted, and the extension loads only for sessions started inside that repository.
+
+### Try or develop without installing
+
+Clone the repo anywhere and point `pi -e` at the checkout - the extension loads for the current run only:
+
+```bash
+git clone https://github.com/zhang-stephen/pi-workspaces.git
+pi -e ./pi-workspaces
 ```
 
-Loads only for sessions started inside that repository. Suitable for team-shared setups: the extension travels with the repo.
+**Trust note.** Project-scoped installs (`.pi/settings.json`) load only after the project is trusted. pi resolves trust from saved `trust.json` decisions first, then its `defaultProjectTrust` setting decides whether it asks, trusts, or declines. Until the project is trusted the extension simply is not loaded.
 
-**Trust note.** Project-local `.pi/extensions` entries load only after the project is trusted. pi resolves trust from saved `trust.json` decisions first, then its `defaultProjectTrust` setting decides whether it asks, trusts, or declines. Until the project is trusted the extension simply is not loaded.
-
-> [!WARNING] Never install in both locations at once!
-> pi auto-discovers both directories and loads **two instances** of the extension. The seven tool overrides then double-register (`bash`, `read`, `write`, ...), which breaks tool dispatch and rendering. Pick exactly one location per machine-and-repo setup; if you ever migrate, delete the other copy first.
+> [!WARNING] Never install it twice for the same sessions!
+> If pi finds the extension via both user settings and project settings (or additionally via `pi -e`), it loads **two instances** and the seven tool overrides double-register (`bash`, `read`, `write`, ...), which breaks tool dispatch and rendering. Keep exactly one install per machine-and-repo setup; delete the other first when migrating.
 
 ### Install scope decides what you can see
 
@@ -47,8 +58,8 @@ The extension detects how it was loaded and scopes all config access accordingly
 
 | How it was loaded | Definition sources | Config file | `/workspace create` writes to |
 |---|---|---|---|
-| Global install (`~/.pi/agent/extensions/`) | global + project (merged by name) | read | global source |
-| Project install (`<repo>/.pi/extensions/`) | project only | never read | project source |
+| Global install (`pi install`, user settings) | global + project (merged by name) | read | global source |
+| Project install (`pi install -l`, project settings) | project only | never read | project source |
 | `pi -e <path>` (dev loop) | project only | never read | project source |
 
 A project-scoped load never reads or writes anything under `~/.pi/agent/` - not the workspace definitions, not the config file. Your personal global workspaces stay invisible to a repo-shared extension install, and the development loop (`pi -e ...`) behaves the same way. To develop against global definitions, install the extension globally for real.
@@ -202,14 +213,6 @@ A project-level install has two consequences, both expected behavior rather than
 - **Explicit `cwd` drops session env vars.** A `bash` call with an explicit `cwd` runs without the `PI_*` session environment variables (passing the runtime ctx through would override the resolved directory). Calls without `cwd` - the default branch - do inject them.
 - **Symlinked definition files are skipped.** The source scan only accepts regular `.json` files, so a workspace definition that is a symbolic link is silently ignored (use a real file or a link to the directory).
 - **Symlinked directories complete as files.** Inside a root, the autocomplete provider classifies entries by the directory flag, so a symlinked subdirectory is offered without a trailing `/`.
-
-## Post-MVP roadmap
-
-Not in this version, planned or desired later:
-
-- Interactive pickers - create wizard and argument-less `load` picker.
-- `fs.watch` hot-reload of definition files (today definitions are read once at `session_start`; use `/workspace load` to re-read).
-- Cross-root aggregated search conveniences (one grep across all roots with merged results).
 
 ## Development
 
