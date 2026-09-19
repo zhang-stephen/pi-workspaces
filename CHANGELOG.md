@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.2](https://github.com/zhang-stephen/pi-workspaces/compare/v0.1.1...v0.1.2) (2026-09-19)
+
+
+### Bug Fixes
+
+* **ci:** fix issue caused by using taobao mirror for npmjs ([97847bd](https://github.com/zhang-stephen/pi-workspaces/commit/97847bdacfd88bf6668ca1c6cd7a9c9600551a34))
+
 ## [0.1.1](https://github.com/zhang-stephen/pi-workspaces/compare/v0.1.0...v0.1.1) (2026-09-19)
 
 
