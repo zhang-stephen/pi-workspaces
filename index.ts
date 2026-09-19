@@ -41,18 +41,23 @@ import {
 const JOURNAL_TYPE = "pi-workspaces:active";
 
 /**
- * Decide which definition sources this install may see from the extension
- * file's own location. A global install (<agentDir>/extensions/) scans both
- * sources and reads the global defaults config. Anything else - a project
- * install under <cwd>/.pi/extensions/ or an explicit -e dev path - is
- * project-scoped: only <cwd>/.pi/workspaces is visible and the global
- * config files are never read or written. Detection failure defaults to
- * the safe project scope.
+ * Pure predicate behind detectInstallScope: pi recognizes three user-level
+ * install layouts under the agent dir - hand-copied extensions/, npm-installed
+ * packages (pi install npm:...), and git-cloned packages (pi install git:...).
+ * A module living inside any of them is a personal, cross-project install.
+ * Everything else - a repo's .pi install, a pi -e checkout, a temp trial - is
+ * project-scoped.
  */
+export function installScopeForLocation(selfPath: string, agentDir: string): InstallScope {
+  return ["extensions", "npm", "git"].some((dir) => isInside(path.join(agentDir, dir), selfPath))
+    ? "global"
+    : "project";
+}
+
 function detectInstallScope(): InstallScope {
   try {
     const self = fileURLToPath(import.meta.url);
-    return isInside(path.join(getAgentDir(), "extensions"), self) ? "global" : "project";
+    return installScopeForLocation(self, getAgentDir());
   } catch {
     return "project";
   }
