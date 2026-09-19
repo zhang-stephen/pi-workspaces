@@ -1,0 +1,24 @@
+name: Unit Tests
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22/24 are the LTS lines, 25 the Current line the author develops on.
+        # The floor (22.19) matches the engines field and pi's own requirement.
+        node-version: [22, 24, 25]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - run: npm ci
+      - run: npx tsc --noEmit
+      - run: npm test
