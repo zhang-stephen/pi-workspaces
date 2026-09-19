@@ -157,6 +157,9 @@ bash(command: "pwd")                 # 会话启动目录
 | `/workspace create <名字>` | 以当前目录为唯一根创建定义并激活。写入与安装作用域匹配的来源（全局安装写全局来源；其余写项目来源）。 |
 | `/workspace add [名字] <路径>` | 给当前工作区添加根（别名：`add-root`）。名字可省略（默认取目录 basename）；相对路径锚定在会话目录。定义会持久化写回其来源。 |
 | `/workspace remove <名字>` | 从当前工作区移除根并持久化（别名：`remove-root`）。最后一个根不可移除。 |
+| `/workspace config` | 显示生效配置及其来源 —— 每个键的值来自项目文件、全局文件还是内置默认值。 |
+| `/workspace config set <键> <值> [global\|project]` | 校验并设置一个配置键（`activation`、`warnOnUnrelatedLoad`、`projectRootAscend`）。级别默认 `global`；传 `project` 则写入项目级覆盖。`projectRootAscend` 只接受 `global` 级。写入保留文件中的其他键，且为原子操作。 |
+| `/workspace config unset <键> [global\|project]` | 移除一个键的覆盖，使解析链回退到下一级；并报告新的生效值。 |
 
 交互式参数选择器（例如无参数 `load` 时的模糊选择器）属于 MVP 之后的功能 —— 目前缺参数时会打印用法说明。
 
@@ -204,7 +207,6 @@ bash(command: "pwd")                 # 会话启动目录
 
 本版本未包含、后续计划或希望加入的：
 
-- `/workspace config` —— 在会话内编辑全局默认选项（`~/.pi/agent/pi-workspaces.json`）。
 - 交互式选择器 —— 创建向导和无参数 `load` 选择器。
 - 定义文件的 `fs.watch` 热重载（目前定义只在 `session_start` 读取一次；请用 `/workspace load` 重新读取）。
 - 跨根聚合搜索的便利功能（一次 grep 搜索所有根并合并结果）。
@@ -220,3 +222,7 @@ node --test "test/**/*.ts"
 ```
 
 TypeScript 由 pi 通过 jiti 直接加载 —— 无构建步骤、无第三方运行时依赖（仅用 Node 内置模块 + pi 导出）。
+
+## 许可证
+
+MIT - 见 [LICENSE](./LICENSE)。

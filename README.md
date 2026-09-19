@@ -157,6 +157,9 @@ All commands are `/workspace` subcommands; output is shown via pi notifications.
 | `/workspace create <name>` | Create a definition with the current directory as its sole root, and activate it. Saved to the source matching the install scope (global installs: global source; everything else: project source). |
 | `/workspace add [name] <path>` | Add a root to the active workspace (alias: `add-root`). The name is optional (derived from the directory basename when omitted); a relative path anchors at the session directory. The definition is persisted back to its origin source. |
 | `/workspace remove <name>` | Remove a root from the active workspace and persist (alias: `remove-root`). The last remaining root cannot be removed. |
+| `/workspace config` | Show the effective config with provenance - for each key, whether its value comes from the project file, the global file, or the built-in default. |
+| `/workspace config set <key> <value> [global\|project]` | Validate and set one config key (`activation`, `warnOnUnrelatedLoad`, `projectRootAscend`). The level defaults to `global`; pass `project` to write the project override instead. `projectRootAscend` only accepts the `global` level. Writes preserve every other key in the file and are atomic. |
+| `/workspace config unset <key> [global\|project]` | Remove one key override so the resolution chain falls back to the next level; reports the new effective value. |
 
 Interactive argument pickers (for example a fuzzy `load` picker) are post-MVP - missing arguments print usage text instead.
 
@@ -204,7 +207,6 @@ A project-level install has two consequences, both expected behavior rather than
 
 Not in this version, planned or desired later:
 
-- `/workspace config` - edit the global default options (`~/.pi/agent/pi-workspaces.json`) from within a session.
 - Interactive pickers - create wizard and argument-less `load` picker.
 - `fs.watch` hot-reload of definition files (today definitions are read once at `session_start`; use `/workspace load` to re-read).
 - Cross-root aggregated search conveniences (one grep across all roots with merged results).
@@ -220,3 +222,7 @@ node --test "test/**/*.ts"
 ```
 
 TypeScript loaded directly by pi via jiti - no build step, no third-party runtime dependencies (Node built-ins + pi exports only).
+
+## License
+
+MIT - see [LICENSE](./LICENSE).
