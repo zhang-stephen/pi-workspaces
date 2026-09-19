@@ -1,5 +1,5 @@
-// The /workspace command: one command, seven subcommands -
-// (none)/status, list, load, unload, create, add-root, remove-root.
+// The /workspace command: one command, eight subcommands -
+// (none)/status, list, load, unload, create, add-root, remove-root, config.
 // Output goes through ctx.ui.notify; every failure (bad args, unknown
 // workspace, store-level validation errors from addRoot/removeRoot) is
 // reported as notify(msg, "error"). Interactive pickers for missing
@@ -15,18 +15,25 @@ import type { ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { isInside, type WorkspaceInfo } from "./path-resolver.ts";
 import {
   addRoot,
+  DEFAULT_PROJECT_ROOT_ASCEND,
+  discoverProjectDir,
+  globalConfigFile,
   globalWorkspacesDir,
   loadAll,
   loadGlobalConfig,
   loadProjectConfig,
   NAME_PATTERN,
+  projectConfigFile,
   removeRoot,
   resolveConfig,
   saveDefinition,
+  setConfigKey,
   toWorkspaceInfo,
+  unsetConfigKey,
   type InstallScope,
   type LoadedDef,
   type RootDefinition,
+  type WorkspaceConfig,
   type WorkspaceDefinition,
 } from "./workspace-store.ts";
 
@@ -52,7 +59,7 @@ interface ArgumentItem {
   description?: string;
 }
 
-type ArgKind = "none" | "workspace" | "root" | "create-name" | "add";
+type ArgKind = "none" | "workspace" | "root" | "create-name" | "add" | "config";
 
 interface SubcommandSpec {
   name: string;
@@ -71,6 +78,7 @@ const SUBCOMMANDS: SubcommandSpec[] = [
   { name: "add-root", description: "Add a root to the active workspace: [name] <path>", args: "add" },
   { name: "remove", description: "Remove a root from the active workspace (alias of remove-root)", args: "root" },
   { name: "remove-root", description: "Remove a root from the active workspace", args: "root" },
+  { name: "config", description: "Show or change the plugin config (set/unset keys)", args: "config" },
 ];
 
 /**
@@ -107,6 +115,8 @@ function completeSubcommandArg(spec: SubcommandSpec, rest: string, deps: Command
       return completeRootName(spec, rest, deps);
     case "add":
       return completeAddArgs(spec, rest, deps);
+    case "config":
+      return completeConfigArgs(spec, rest, deps);
     default:
       return null; // none / create-name: free text or no arguments
   }
@@ -150,6 +160,20 @@ function completeRootName(spec: SubcommandSpec, rest: string, deps: CommandDeps)
 /** A token is a path when it contains a separator or a drive letter. */
 function looksLikePath(token: string): boolean {
   return token.includes("/") || token.includes("\\") || /^[A-Za-z]:/.test(token);
+}
+
+/**
+ * The project config path as completion display text. pi calls argument
+ * completion without a command context, so the project root is re-discovered
+ * from the session cwd exactly the way loadAll does (marker ascent, cap from
+ * the global config in global scope).
+ */
+function projectConfigPathFor(deps: CommandDeps): string {
+  const ascend =
+    deps.scope === "global"
+      ? (loadGlobalConfig().projectRootAscend ?? DEFAULT_PROJECT_ROOT_ASCEND)
+      : DEFAULT_PROJECT_ROOT_ASCEND;
+  return projectConfigFile(discoverProjectDir(deps.getCwd(), ascend));
 }
 
 const MAX_ARG_SUGGESTIONS = 50;
@@ -216,7 +240,14 @@ function usage(scope: InstallScope): string {
   create <name>           create a workspace with the current directory as its
                           sole root (saved to the ${scope} source)
   add [name] <path>       add a root to the active workspace (alias: add-root)
-  remove <name>           remove a root from the active workspace (alias: remove-root)`;
+  remove <name>           remove a root from the active workspace (alias: remove-root)
+  config                  show the effective config and where each key comes from
+  config set <key> <value> [global|project]
+                          set a config key (default level: global; keys:
+                          activation, warnOnUnrelatedLoad, projectRootAscend)
+  config unset <key> [global|project]
+                          remove a config key override; falls back to the next
+                          level of the resolution chain`;
 }
 
 /**
@@ -269,6 +300,67 @@ function rootExists(root: RootDefinition): boolean {
   }
 }
 
+/**
+ * `config` completes its argument chain: set/unset, then the key name, then
+ * (for set) the value when the key has a known value set, then the optional
+ * level token - filtered per install scope and per key (projectRootAscend is
+ * global-only; project-scoped installs never complete or accept 'global').
+ */
+function completeConfigArgs(spec: SubcommandSpec, rest: string, deps: CommandDeps): ArgumentItem[] | null {
+  const tokens = rest.split(/\s+/);
+  const valuePrefix = (fixed: string[]): string => `${spec.name} ${fixed.join(" ")} `;
+  if (tokens.length === 1) {
+    // Completing the operation: set / unset.
+    const lower = tokens[0].toLowerCase();
+    const items = [
+      { name: "set", description: "Set a config key (default level: global)" },
+      { name: "unset", description: "Remove a config key override" },
+    ]
+      .filter((op) => op.name.startsWith(lower))
+      .map((op) => ({ value: `${spec.name} ${op.name} `, label: op.name, description: op.description }));
+    return items.length > 0 ? items : null;
+  }
+  const op = tokens[0].toLowerCase();
+  if (op !== "set" && op !== "unset") return null;
+  const fixed = tokens.slice(1, -1);
+  const prefix = tokens[tokens.length - 1].toLowerCase();
+  if (fixed.length === 0) {
+    // Completing the key name.
+    const items = CONFIG_KEY_SPECS.filter((k) => k.key.startsWith(prefix)).map((k) => ({
+      value: `${spec.name} ${op} ${k.key} `,
+      label: k.key,
+      description: k.expected,
+    }));
+    return items.length > 0 ? items : null;
+  }
+  const key = fixed[0];
+  const keySpec = CONFIG_KEY_SPECS.find((k) => k.key === key);
+  if (!keySpec) return null;
+  if (op === "set" && fixed.length === 1) {
+    // Completing the value: suggest it only when the key has a known value set.
+    if (!keySpec.values) return null;
+    const items = keySpec.values
+      .filter((v) => v.startsWith(prefix))
+      .map((v) => ({ value: `${spec.name} set ${key} ${v}`, label: v }));
+    return items.length > 0 ? items : null;
+  }
+  // Completing the optional level token.
+  if ((op === "set" && fixed.length === 2) || (op === "unset" && fixed.length === 1)) {
+    const levels: { level: ConfigLevel; description: string }[] = [];
+    if (deps.scope === "global") {
+      levels.push({ level: "global", description: globalConfigFile() });
+    }
+    if (!keySpec.globalOnly) {
+      levels.push({ level: "project", description: projectConfigPathFor(deps) });
+    }
+    const items = levels
+      .filter((l) => l.level.startsWith(prefix))
+      .map((l) => ({ value: `${spec.name} ${op} ${fixed.join(" ")} ${l.level}`, label: l.level, description: l.description }));
+    return items.length > 0 ? items : null;
+  }
+  return null;
+}
+
 function notify(ctx: ExtensionCommandContext, msg: string, level: "info" | "warning" | "error" = "info"): void {
   ctx.ui.notify(msg, level);
 }
@@ -288,7 +380,7 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
     // [u:npm:pi-workspaces] once published; directory installs show only a
     // bare scope letter either way.
     description:
-      "Manage multi-root workspaces (status, list, load, unload, create, add, remove)",
+      "Manage multi-root workspaces (status, list, load, unload, create, add, remove, config)",
     getArgumentCompletions: (argumentPrefix: string) => completeWorkspaceArgs(argumentPrefix, deps),
     handler: async (args: string, ctx: ExtensionCommandContext): Promise<void> => {
       const tokens = args
@@ -304,6 +396,8 @@ export function registerWorkspaceCommands(pi: any, deps: CommandDeps): void {
             return showStatus(ctx, deps);
           case "list":
             return showList(ctx, deps);
+          case "config":
+            return await configCommand(ctx, deps, rest);
           case "load":
             return await loadWorkspace(ctx, deps, rest[0]);
           case "unload":
@@ -488,6 +582,229 @@ async function changeRoots(
   const ws = toWorkspaceInfo(mutated, entry.origin);
   deps.setActive(ws, ctx);
   notify(ctx, formatStatus(ws));
+}
+
+// -------------------------------------------------------------------------
+// /workspace config: show and mutate the flat plugin config (D4)
+// -------------------------------------------------------------------------
+
+type ConfigLevel = "global" | "project";
+
+interface ConfigKeySpec {
+  key: string;
+  /** Known value set, completed and displayed; null = free-form (integer). */
+  values: string[] | null;
+  /** Human-readable expected format, shown on invalid values and completion. */
+  expected: string;
+  /** projectRootAscend is global-only: the ascent cap controls how the
+   * project itself is discovered, so no project-level override exists (D4). */
+  globalOnly: boolean;
+  parse(raw: string): unknown;
+  /** Effect-timing note appended to set/unset confirmations. */
+  effect: string;
+}
+
+const CONFIG_KEY_SPECS: ConfigKeySpec[] = [
+  {
+    key: "activation",
+    values: ["auto", "prompt"],
+    expected: "'auto' or 'prompt'",
+    globalOnly: false,
+    parse: (raw) => raw,
+    effect: "Applies to new sessions (activation is resolved at session start).",
+  },
+  {
+    key: "warnOnUnrelatedLoad",
+    values: ["true", "false"],
+    expected: "'true' or 'false'",
+    globalOnly: false,
+    parse: (raw) => raw === "true",
+    effect: "Applies from the next /workspace load.",
+  },
+  {
+    key: "projectRootAscend",
+    values: null,
+    expected: "a non-negative integer (global-only key)",
+    globalOnly: true,
+    parse: (raw) => Number(raw),
+    effect: "Applies from the next workspace source scan (list/load/create).",
+  },
+];
+
+function findKeySpec(key: string): ConfigKeySpec | undefined {
+  return CONFIG_KEY_SPECS.find((spec) => spec.key === key);
+}
+
+/**
+ * Validate a raw value string against a key spec. Returns the typed JSON
+ * value to persist, or an error message when the value is malformed.
+ */
+function parseConfigValue(spec: ConfigKeySpec, raw: string): { ok: true; value: unknown } | { ok: false; error: string } {
+  if (spec.values) {
+    if (spec.values.includes(raw)) return { ok: true, value: spec.parse(raw) };
+    return { ok: false, error: `Invalid value for '${spec.key}': expected ${spec.expected}.` };
+  }
+  if (/^\d+$/.test(raw)) return { ok: true, value: spec.parse(raw) };
+  return { ok: false, error: `Invalid value for '${spec.key}': expected ${spec.expected}.` };
+}
+
+/**
+ * Decide which file a set/unset targets. The trailing level token defaults
+ * to 'global' in global scope (the plugin config is primarily the user's
+ * personal defaults) and to 'project' in project scope (the only file that
+ * scope may ever touch). Rejections: an unknown token, the 'global' level
+ * under a project-scoped install, and any project-level write to a
+ * global-only key.
+ */
+function resolveConfigLevel(
+  deps: CommandDeps,
+  spec: ConfigKeySpec,
+  token: string | undefined,
+): { ok: true; level: ConfigLevel } | { ok: false; error: string } {
+  const level = token ?? (deps.scope === "global" ? "global" : "project");
+  if (level !== "global" && level !== "project") {
+    return { ok: false, error: `Unknown config level '${token}' (use 'global' or 'project').` };
+  }
+  if (level === "global" && deps.scope !== "global") {
+    return {
+      ok: false,
+      error: "Project-scoped installs never read or write the global config; omit the level or use 'project'.",
+    };
+  }
+  if (level === "project" && spec.globalOnly) {
+    return {
+      ok: false,
+      error: `'${spec.key}' is a global-only key: the ascent cap controls how the project itself is discovered, so it has no project-level override.`,
+    };
+  }
+  return { ok: true, level };
+}
+
+function levelFile(level: ConfigLevel, projectRoot: string): string {
+  return level === "global" ? globalConfigFile() : projectConfigFile(projectRoot);
+}
+
+/** The visible global partial for provenance display: empty in project scope. */
+function visibleGlobalConfig(deps: CommandDeps): Partial<WorkspaceConfig> {
+  return deps.scope === "global" ? loadGlobalConfig() : {};
+}
+
+/**
+ * One aligned config row: key, effective value, and provenance - which level
+ * of the resolution chain currently supplies the value. In project scope the
+ * global level is invisible, so rows resolve to project or builtin only, and
+ * the global-only ascend key is labeled as such.
+ */
+export function formatConfigRow(
+  deps: CommandDeps,
+  resolved: WorkspaceConfig,
+  project: Partial<WorkspaceConfig>,
+  global: Partial<WorkspaceConfig>,
+  key: string,
+): string {
+  const spec = findKeySpec(key);
+  const k = key as keyof WorkspaceConfig;
+  let source: string;
+  if (project[k] !== undefined) {
+    source = `project (${projectConfigFile(discoverProjectDirFrom(deps))})`;
+  } else if (global[k] !== undefined) {
+    source = `global (${globalConfigFile()})`;
+  } else {
+    source = spec?.globalOnly && deps.scope !== "global" ? "builtin default (global-only key)" : "builtin default";
+  }
+  return `  ${key.padEnd(20)}${String(resolved[k]).padEnd(8)}${source}`;
+}
+
+function discoverProjectDirFrom(deps: CommandDeps): string {
+  const ascend =
+    deps.scope === "global"
+      ? (loadGlobalConfig().projectRootAscend ?? DEFAULT_PROJECT_ROOT_ASCEND)
+      : DEFAULT_PROJECT_ROOT_ASCEND;
+  return discoverProjectDir(deps.getCwd(), ascend);
+}
+
+/**
+ * The /workspace config dispatcher: bare shows the effective config with
+ * provenance; `set <key> <value> [level]` and `unset <key> [level]` mutate
+ * exactly one key of one level's file (all other keys preserved). Any other
+ * first token prints the usage.
+ */
+async function configCommand(ctx: ExtensionCommandContext, deps: CommandDeps, rest: string[]): Promise<void> {
+  const op = rest[0];
+  if (op === undefined) {
+    notify(ctx, formatConfig(deps));
+    return;
+  }
+  if (op === "set" || op === "unset") {
+    return await changeConfig(ctx, deps, op, rest.slice(1));
+  }
+  notify(ctx, `Unknown config operation '${op}'.\n\n${configUsage()}`, "error");
+}
+
+function configUsage(): string {
+  return `Usage: /workspace config
+       /workspace config set <key> <value> [global|project]
+       /workspace config unset <key> [global|project]
+Keys: ${CONFIG_KEY_SPECS.map((k) => k.key).join(", ")}`;
+}
+
+/** Bare `config`: effective values plus provenance, via the standard chain. */
+function formatConfig(deps: CommandDeps): string {
+  const projectRoot = discoverProjectDirFrom(deps);
+  const project = loadProjectConfig(projectRoot);
+  const global = visibleGlobalConfig(deps);
+  const resolved = resolveConfig(project, global);
+  const rows = CONFIG_KEY_SPECS.map((spec) => formatConfigRow(deps, resolved, project, global, spec.key));
+  return ["Effective config (project > global > builtin default):", ...rows].join("\n");
+}
+
+/**
+ * `config set` / `config unset`: validate key, value (set only) and level,
+ * then persist exactly one key to exactly one file and report the outcome -
+ * including the effect-timing note and, for unset, the value the resolution
+ * chain now falls back to.
+ */
+async function changeConfig(ctx: ExtensionCommandContext, deps: CommandDeps, op: "set" | "unset", rest: string[]): Promise<void> {
+  const expectedArgs = op === "set" ? "<key> <value> [global|project]" : "<key> [global|project]";
+  if (rest.length < (op === "set" ? 2 : 1) || rest.length > (op === "set" ? 3 : 2)) {
+    notify(ctx, `Usage: /workspace config ${op} ${expectedArgs}`, "error");
+    return;
+  }
+  const key = rest[0];
+  const spec = findKeySpec(key);
+  if (!spec) {
+    notify(ctx, `Unknown config key '${key}'. Valid keys: ${CONFIG_KEY_SPECS.map((k) => k.key).join(", ")}.`, "error");
+    return;
+  }
+  if (op === "set") {
+    const parsed = parseConfigValue(spec, rest[1]);
+    if (!parsed.ok) {
+      notify(ctx, parsed.error, "error");
+      return;
+    }
+    const level = resolveConfigLevel(deps, spec, rest[2]);
+    if (!level.ok) {
+      notify(ctx, level.error, "error");
+      return;
+    }
+    const file = levelFile(level.level, discoverProjectDirFrom(deps));
+    await setConfigKey(file, key, parsed.value);
+    notify(ctx, `Set ${key} = ${JSON.stringify(parsed.value)} in the ${level.level} config (${file}).\n${spec.effect}`);
+    return;
+  }
+  const level = resolveConfigLevel(deps, spec, rest[1]);
+  if (!level.ok) {
+    notify(ctx, level.error, "error");
+    return;
+  }
+  const file = levelFile(level.level, discoverProjectDirFrom(deps));
+  await unsetConfigKey(file, key);
+  const projectRoot = discoverProjectDirFrom(deps);
+  const resolved = resolveConfig(loadProjectConfig(projectRoot), visibleGlobalConfig(deps));
+  notify(
+    ctx,
+    `Removed '${key}' from the ${level.level} config (${file}).\nEffective value is now ${JSON.stringify(resolved[key as keyof WorkspaceConfig])} (project > global > builtin).`,
+  );
 }
 
 /** Derive a valid root name from the cwd basename (dots/spaces -> "-"). */

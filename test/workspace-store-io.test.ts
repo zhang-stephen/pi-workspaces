@@ -24,7 +24,9 @@ import {
   resolveConfig,
   saveDefinition,
   scanSource,
+  setConfigKey,
   toWorkspaceInfo,
+  unsetConfigKey,
   type WorkspaceDefinition,
 } from "../src/workspace-store.ts";
 import { isInside } from "../src/path-resolver.ts";
@@ -442,4 +444,65 @@ test("loadAll in project scope scans only the project source", () => {
 // far up the tree looking for markers.
 test("DEFAULT_PROJECT_ROOT_ASCEND is the built-in cap", () => {
   assert.equal(DEFAULT_PROJECT_ROOT_ASCEND, 3);
+});
+
+// ---------------------------------------------------------------------------
+// Flat config key mutations (setConfigKey / unsetConfigKey)
+// ---------------------------------------------------------------------------
+
+test("setConfigKey creates the config file with parent directories and sets one key", async () => {
+  const dir = makeTempDir("pi-workspaces-config-");
+  const file = path.join(dir, ".pi", "pi-workspaces.json");
+  try {
+    await setConfigKey(file, "activation", "prompt");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { activation: "prompt" });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("setConfigKey preserves unknown and sibling keys (hand edits survive)", async () => {
+  const dir = makeTempDir("pi-workspaces-config-");
+  const file = path.join(dir, "pi-workspaces.json");
+  fs.writeFileSync(file, JSON.stringify({ activation: "auto", futureKey: [1, 2] }));
+  try {
+    await setConfigKey(file, "warnOnUnrelatedLoad", false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+      activation: "auto",
+      futureKey: [1, 2],
+      warnOnUnrelatedLoad: false,
+    });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("unsetConfigKey removes only the target key; missing file is fine", async () => {
+  const dir = makeTempDir("pi-workspaces-config-");
+  const file = path.join(dir, "pi-workspaces.json");
+  try {
+    await unsetConfigKey(file, "activation"); // no file yet: must not throw
+    fs.writeFileSync(file, JSON.stringify({ activation: "prompt", warnOnUnrelatedLoad: true }));
+    await unsetConfigKey(file, "activation");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { warnOnUnrelatedLoad: true });
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("config key writes are atomic: no .tmp leftover and content is intact", async () => {
+  const dir = makeTempDir("pi-workspaces-config-");
+  const file = path.join(dir, "pi-workspaces.json");
+  try {
+    await setConfigKey(file, "projectRootAscend", 2);
+    await setConfigKey(file, "activation", "prompt");
+    const leftovers = fs.readdirSync(dir).filter((name) => name.endsWith(".tmp"));
+    assert.deepEqual(leftovers, [], "no .tmp sibling survives a completed write");
+    assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), {
+      projectRootAscend: 2,
+      activation: "prompt",
+    });
+  } finally {
+    cleanup(dir);
+  }
 });

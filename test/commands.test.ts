@@ -63,8 +63,8 @@ test("argument completion offers subcommands, trailing space for arg-taking ones
     const complete = (prefix: string) =>
       (cmd as any).getArgumentCompletions(prefix) as Array<{ value: string; label: string; description?: string }> | null;
 
-    // Bare prefix: all nine subcommands.
-    assert.equal(complete("")?.length, 9);
+    // Bare prefix: all ten subcommands.
+    assert.equal(complete("")?.length, 10);
     // Arg-taking subcommands get a trailing space so completion continues.
     assert.deepEqual(complete("lo"), [{ value: "load ", label: "load", description: "Activate a workspace by name" }]);
     assert.deepEqual(complete("unload"), [{ value: "unload", label: "unload", description: "Deactivate the active workspace" }]);

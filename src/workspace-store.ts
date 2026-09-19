@@ -400,6 +400,45 @@ export async function saveDefinition(dir: string, def: WorkspaceDefinition): Pro
 }
 
 /**
+ * Apply one single-key mutation to a flat config file. The raw JSON is read
+ * tolerantly (a missing or non-object file starts from an empty object), the
+ * mutation runs, and every OTHER key is preserved verbatim - hand edits and
+ * future unknown keys survive a set/unset round trip. Writes are atomic:
+ * serialized JSON goes to a sibling .tmp file first and is renamed over the
+ * target, so a crash mid-write can never truncate the config.
+ */
+async function mutateConfigFile(file: string, mutate: (raw: Record<string, unknown>) => void): Promise<void> {
+  let raw: Record<string, unknown> = {};
+  try {
+    const data = JSON.parse(fs.readFileSync(file, "utf8"));
+    if (typeof data === "object" && data !== null && !Array.isArray(data)) {
+      raw = data as Record<string, unknown>;
+    }
+  } catch {
+    // Missing or unreadable file: start from a fresh object.
+  }
+  mutate(raw);
+  const tmp = `${file}.tmp`;
+  await fs.promises.mkdir(path.dirname(file), { recursive: true });
+  await fs.promises.writeFile(tmp, `${JSON.stringify(raw, null, 2)}\n`, "utf8");
+  await fs.promises.rename(tmp, file);
+}
+
+/** Set one key in a flat config file (see mutateConfigFile). */
+export function setConfigKey(file: string, key: string, value: unknown): Promise<void> {
+  return mutateConfigFile(file, (raw) => {
+    raw[key] = value;
+  });
+}
+
+/** Remove one key from a flat config file (see mutateConfigFile). */
+export function unsetConfigKey(file: string, key: string): Promise<void> {
+  return mutateConfigFile(file, (raw) => {
+    delete raw[key];
+  });
+}
+
+/**
  * Health-check a loaded definition into the runtime shape used by the path
  * resolver: every root path is checked on disk, existing roots are
  * canonicalized with realpath (so containment checks can stay lexical),
